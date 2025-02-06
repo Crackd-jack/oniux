@@ -1,5 +1,11 @@
 # oniux
 
-**WARNING:** Do not use it, its highly experimental and very likely to leak in case of a panic/failure
+**WARNING:** This is experimental software, do not use it.
 
-A namespace based replacement for `torsocks`.
+## Usage
+
+```sh
+cargo build
+sudo setcap cap_net_admin,cap_sys_admin+ep ./target/debug/oniux
+./target/debug/oniux --onionmasq /path/to/onionmasq/binary curl https://amiusingtor.net
+```
