@@ -27,7 +27,6 @@ use nix::{
     },
     unistd::{self, ForkResult, Pid},
 };
-use serde::{Deserialize, Serialize};
 use std::thread;
 
 mod netlink;
@@ -41,14 +40,6 @@ struct Args {
     /// The actual program to execute
     #[arg(trailing_var_arg = true, required = true)]
     cmd: Vec<String>,
-}
-
-/// Messages for IPC
-#[derive(Debug, Serialize, Deserialize)]
-#[non_exhaustive]
-enum IPCMessage {
-    /// Tell the isolation child that the TUN device has been moved
-    InterfaceMoved(u32),
 }
 
 /// Drop all capabilities in all capability sets
@@ -85,11 +76,9 @@ fn gen_stack() -> Vec<u8> {
     vec![0u8; 1000 * 1000 * 8]
 }
 
-fn isolation(cmd: &Vec<String>, rx: Arc<IpcReceiver<IPCMessage>>) -> Result<isize> {
+fn isolation(cmd: &Vec<String>, rx: Arc<IpcReceiver<u32>>) -> Result<isize> {
     // Wait until our parent has set up everything nicely
-    let index = match rx.recv()? {
-        IPCMessage::InterfaceMoved(index) => index,
-    };
+    let index = rx.recv()?;
 
     // Configure the IP addresses of the interface
     netlink::add_address(index, IpAddr::V4(Ipv4Addr::new(169, 254, 42, 1)), 24)?;
@@ -186,7 +175,7 @@ fn main_main() -> Result<()> {
     let index = netlink::get_index(&device)?;
     debug!("found {device} interface with index {index}");
 
-    let (tx, rx) = ipc_channel::ipc::channel::<IPCMessage>()?;
+    let (tx, rx) = ipc_channel::ipc::channel::<u32>()?;
     let rx = Arc::new(rx);
     let mut isolation_stack = gen_stack();
     let isolation_proc = unsafe {
@@ -200,7 +189,7 @@ fn main_main() -> Result<()> {
     debug!("spawned isolation with PID {}", isolation_proc.as_raw());
 
     netlink::set_ns(index, isolation_proc.as_raw() as u32)?;
-    tx.send(IPCMessage::InterfaceMoved(index))?;
+    tx.send(index)?;
 
     // Parent no longer needs capabilities too
     drop_caps();

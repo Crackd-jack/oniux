@@ -405,7 +405,6 @@ dependencies = [
  "netlink-packet-route",
  "netlink-sys",
  "nix",
- "serde",
 ]
 
 [[package]]
