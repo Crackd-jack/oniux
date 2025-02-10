@@ -15,7 +15,7 @@ use anyhow::{bail, Result};
 use caps::{CapSet, Capability};
 use clap::Parser;
 use ipc_channel::ipc::IpcReceiver;
-use log::debug;
+use log::{debug, info};
 use nix::mount::{self, MsFlags};
 use nix::{
     fcntl::{self, OFlag},
@@ -25,7 +25,7 @@ use nix::{
         stat::Mode,
         wait::{self, WaitStatus},
     },
-    unistd::{self, ForkResult, Pid},
+    unistd::{self},
 };
 use std::thread;
 
@@ -140,7 +140,7 @@ fn onionmasq(path: &Path, device: &str) -> Result<isize> {
     unreachable!()
 }
 
-fn main_main() -> Result<()> {
+fn main_main() -> Result<isize> {
     env_logger::init();
 
     let args = Args::parse();
@@ -183,8 +183,14 @@ fn main_main() -> Result<()> {
     drop_caps();
 
     match wait::waitpid(isolation_proc, None)? {
-        WaitStatus::Exited(_, code) => process::exit(code),
-        _ => process::exit(1),
+        WaitStatus::Exited(_, code) => {
+            info!("isolated process exited with {code}");
+            process::exit(code);
+        }
+        res => {
+            info!("isolated process exited with {:?}", res);
+            process::exit(1);
+        }
     }
 }
 
@@ -197,17 +203,18 @@ fn main() -> Result<()> {
         bail!("not having CAP_NET_ADMIN capability");
     }
 
-    // TODO: Use clone(2) here, because it would be more consistent with the codebase then
-    sched::unshare(CloneFlags::CLONE_NEWPID)?;
-    match unsafe { unistd::fork() }? {
-        ForkResult::Child => {
-            assert_eq!(Pid::this().as_raw(), 1);
-            main_main().unwrap();
-            unreachable!()
-        }
-        ForkResult::Parent { child } => match wait::waitpid(child, None)? {
-            WaitStatus::Exited(_, code) => process::exit(code),
-            _ => unreachable!(),
-        },
+    let mut stack = gen_stack();
+    let proc = unsafe {
+        sched::clone(
+            Box::new(|| main_main().unwrap()),
+            &mut stack,
+            CloneFlags::CLONE_NEWPID,
+            Some(libc::SIGCHLD),
+        )
+    }?;
+
+    match wait::waitpid(proc, None)? {
+        WaitStatus::Exited(_, code) => process::exit(code),
+        _ => process::exit(1),
     }
 }
