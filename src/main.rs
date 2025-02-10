@@ -39,7 +39,7 @@ struct Args {
     onionmasq: PathBuf,
 
     /// The actual program to execute
-    #[arg(trailing_var_arg = true)]
+    #[arg(trailing_var_arg = true, required = true)]
     cmd: Vec<String>,
 }
 
