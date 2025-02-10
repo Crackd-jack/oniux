@@ -123,6 +123,9 @@ fn isolation(cmd: &Vec<String>, rx: Arc<IpcReceiver<u32>>) -> Result<isize> {
 }
 
 fn onionmasq(path: &Path, device: &str) -> Result<isize> {
+    // VERY IMPORTANT
+    drop_caps();
+
     let path = [path.as_os_str().as_bytes(), "\0".as_bytes()].concat();
     let path = CStr::from_bytes_with_nul(&path)?;
 
@@ -162,10 +165,7 @@ fn main_main() -> Result<()> {
     let mut onionmasq_stack = gen_stack();
     let onionmasq_proc = unsafe {
         sched::clone(
-            Box::new(|| {
-                drop_caps(); // VERY IMPORTANT
-                onionmasq(&args.onionmasq, &device).unwrap()
-            }),
+            Box::new(|| onionmasq(&args.onionmasq, &device).unwrap()),
             &mut onionmasq_stack,
             CloneFlags::empty(),
             None,
