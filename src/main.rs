@@ -118,8 +118,7 @@ fn isolation(cmd: &Vec<String>, rx: Arc<IpcReceiver<u32>>) -> Result<isize> {
 
     let cmd: Vec<CString> = cmd.iter().map(|s| CString::from_str(s).unwrap()).collect();
     unistd::execvp(&cmd[0], &cmd)?;
-
-    Ok(0)
+    unreachable!()
 }
 
 fn onionmasq(path: &Path, device: &str) -> Result<isize> {
@@ -138,8 +137,7 @@ fn onionmasq(path: &Path, device: &str) -> Result<isize> {
     unistd::dup2(nullfd, 2)?;
 
     unistd::execv(path, &args)?;
-
-    Ok(0)
+    unreachable!()
 }
 
 fn main_main() -> Result<()> {
@@ -205,11 +203,11 @@ fn main() -> Result<()> {
         ForkResult::Child => {
             assert_eq!(Pid::this().as_raw(), 1);
             main_main().unwrap();
-            process::exit(0);
+            unreachable!()
         }
         ForkResult::Parent { child } => match wait::waitpid(child, None)? {
             WaitStatus::Exited(_, code) => process::exit(code),
-            _ => process::exit(1),
+            _ => unreachable!(),
         },
     }
 }
