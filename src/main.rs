@@ -147,19 +147,6 @@ fn main_main() -> Result<()> {
 
     let args = Args::parse();
 
-    // Check if we run in a PID namespace
-    if Pid::this().as_raw() != 1 {
-        bail!("not running as PID 1 in a PID namespace");
-    }
-
-    // Check the capabilities
-    if !caps::has_cap(None, CapSet::Permitted, Capability::CAP_SYS_ADMIN)? {
-        bail!("not having CAP_SYS_ADMIN capability");
-    }
-    if !caps::has_cap(None, CapSet::Permitted, Capability::CAP_NET_ADMIN)? {
-        bail!("not having CAP_NET_ADMIN capability");
-    }
-
     let device = gen_device_name();
 
     let mut onionmasq_stack = gen_stack();
@@ -204,10 +191,19 @@ fn main_main() -> Result<()> {
 }
 
 fn main() -> Result<()> {
+    // Check the capabilities
+    if !caps::has_cap(None, CapSet::Permitted, Capability::CAP_SYS_ADMIN)? {
+        bail!("not having CAP_SYS_ADMIN capability");
+    }
+    if !caps::has_cap(None, CapSet::Permitted, Capability::CAP_NET_ADMIN)? {
+        bail!("not having CAP_NET_ADMIN capability");
+    }
+
     // TODO: Use clone(2) here, because it would be more consistent with the codebase then
     sched::unshare(CloneFlags::CLONE_NEWPID)?;
     match unsafe { unistd::fork() }? {
         ForkResult::Child => {
+            assert_eq!(Pid::this().as_raw(), 1);
             main_main().unwrap();
             process::exit(0);
         }
