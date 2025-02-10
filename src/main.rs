@@ -185,7 +185,7 @@ fn main_main() -> Result<()> {
         sched::clone(
             Box::new(move || isolation(&args.cmd, rx.clone()).unwrap()),
             &mut isolation_stack,
-            CloneFlags::CLONE_NEWNS | CloneFlags::CLONE_NEWNET | CloneFlags::CLONE_NEWUSER,
+            CloneFlags::CLONE_NEWNS | CloneFlags::CLONE_NEWNET,
             Some(libc::SIGCHLD),
         )?
     };
