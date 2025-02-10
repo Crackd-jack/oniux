@@ -400,7 +400,6 @@ dependencies = [
  "clap",
  "env_logger",
  "ipc-channel",
- "libc",
  "log",
  "netlink-packet-core",
  "netlink-packet-route",

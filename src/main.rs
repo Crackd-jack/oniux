@@ -19,6 +19,7 @@ use log::debug;
 use nix::mount::{self, MsFlags};
 use nix::{
     fcntl::{self, OFlag},
+    libc,
     sched::{self, CloneFlags},
     sys::{
         stat::Mode,
