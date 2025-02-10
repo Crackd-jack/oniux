@@ -2,7 +2,7 @@ use std::{
     ffi::{CStr, CString},
     fs::File,
     io::Write,
-    net::{IpAddr, Ipv4Addr},
+    net::{IpAddr, Ipv4Addr, Ipv6Addr},
     os::unix::ffi::OsStrExt,
     path::{Path, PathBuf},
     process::{self},
@@ -16,6 +16,7 @@ use caps::{CapSet, Capability};
 use clap::Parser;
 use ipc_channel::ipc::IpcReceiver;
 use log::{debug, info};
+use netlink_packet_route::AddressFamily;
 use nix::mount::{self, MsFlags};
 use nix::{
     fcntl::{self, OFlag},
@@ -85,8 +86,14 @@ fn isolation(cmd: &Vec<String>, rx: Arc<IpcReceiver<u32>>) -> Result<isize> {
 
     // Configure the IP addresses of the interface
     netlink::add_address(index, IpAddr::V4(Ipv4Addr::new(169, 254, 42, 1)), 24)?;
+    netlink::add_address(
+        index,
+        IpAddr::V6(Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 0x1)),
+        96,
+    )?;
     netlink::set_up(index)?;
-    netlink::add_gateway(IpAddr::V4(Ipv4Addr::new(169, 254, 42, 1)))?;
+    netlink::set_default_gateway(index, AddressFamily::Inet)?;
+    netlink::set_default_gateway(index, AddressFamily::Inet6)?;
     debug!("finished setting up the device");
 
     // Add DNS support
@@ -100,7 +107,7 @@ fn isolation(cmd: &Vec<String>, rx: Arc<IpcReceiver<u32>>) -> Result<isize> {
     debug!("mounted /tmp");
 
     let mut resolv_conf = File::create("/tmp/resolv.conf")?;
-    resolv_conf.write_all("nameserver 169.254.42.53".as_bytes())?;
+    resolv_conf.write_all("nameserver 169.254.42.53\nnameserver fe80::53\n".as_bytes())?;
     drop(resolv_conf);
     debug!("created /tmp/resolv.conf");
 

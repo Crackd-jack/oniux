@@ -17,10 +17,7 @@ use netlink_packet_core::{
 use netlink_packet_route::{
     address::{AddressAttribute, AddressMessage},
     link::{LinkAttribute, LinkFlags, LinkMessage},
-    route::{
-        RouteAddress, RouteAttribute, RouteHeader, RouteMessage, RouteProtocol, RouteScope,
-        RouteType,
-    },
+    route::{RouteAttribute, RouteHeader, RouteMessage, RouteProtocol, RouteScope, RouteType},
     AddressFamily, RouteNetlinkMessage,
 };
 use netlink_sys::{protocols::NETLINK_ROUTE, Socket, SocketAddr};
@@ -200,30 +197,21 @@ pub fn add_address(index: u32, addr: IpAddr, prefix_len: u8) -> Result<()> {
     Ok(())
 }
 
-pub fn add_gateway(addr: IpAddr) -> Result<()> {
+/// Sets the interface with `index` as the default gateway for `af`
+///
+/// TODO: Consider not exposing `AddressFamily` here
+pub fn set_default_gateway(index: u32, af: AddressFamily) -> Result<()> {
     let mut socket = create_socket(NETLINK_ROUTE)?;
-    debug!("created socket for adding default gateway");
+    debug!("created socket for adding default gateway for {:?}", af);
 
     let mut route_msg = RouteMessage::default();
     route_msg.header.table = RouteHeader::RT_TABLE_MAIN;
     route_msg.header.protocol = RouteProtocol::Static;
     route_msg.header.scope = RouteScope::Universe;
     route_msg.header.kind = RouteType::Unicast;
+    route_msg.header.address_family = af;
 
-    match addr {
-        IpAddr::V4(v4) => {
-            route_msg.header.address_family = AddressFamily::Inet;
-            route_msg
-                .attributes
-                .push(RouteAttribute::Gateway(RouteAddress::Inet(v4)));
-        }
-        IpAddr::V6(v6) => {
-            route_msg.header.address_family = AddressFamily::Inet6;
-            route_msg
-                .attributes
-                .push(RouteAttribute::Gateway(RouteAddress::Inet6(v6)));
-        }
-    }
+    route_msg.attributes.push(RouteAttribute::Oif(index));
 
     let mut msg = NetlinkMessage::new(
         NetlinkHeader::default(),
@@ -239,11 +227,12 @@ pub fn add_gateway(addr: IpAddr) -> Result<()> {
     match resp.payload {
         NetlinkPayload::Error(ErrorMessage { code: None, .. }) => {}
         e => bail!(
-            "netlink failed for unknown reasons default gateway {:#?}",
+            "netlink failed for unknown reasons default gateway {:?} {:#?}",
+            af,
             e
         ),
     }
-    debug!("added default gateway");
+    debug!("added default gateway {:?}", af);
 
     Ok(())
 }
