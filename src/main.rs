@@ -157,6 +157,7 @@ fn main_main() -> Result<()> {
         bail!("not running as PID 1 in a PID namespace");
     }
 
+    // Check the capabilities
     if !caps::has_cap(None, CapSet::Permitted, Capability::CAP_SYS_ADMIN)? {
         bail!("not having CAP_SYS_ADMIN capability");
     }
