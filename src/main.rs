@@ -31,6 +31,9 @@ use std::thread;
 
 mod netlink;
 
+/// The size of the stacks of our child processes
+const STACK_SIZE: usize = 1000 * 1000 * 8;
+
 #[derive(Parser, Debug)]
 struct Args {
     /// Path to the onionmasq binary
@@ -71,9 +74,9 @@ fn gen_device_name() -> String {
     "onion0".into()
 }
 
-/// Generate an empty 8MB stack for calls to `clone(2)`
+/// Generate an empty stack for calls to `clone(2)`
 fn gen_stack() -> Vec<u8> {
-    vec![0u8; 1000 * 1000 * 8]
+    vec![0u8; STACK_SIZE]
 }
 
 fn isolation(cmd: &Vec<String>, rx: Arc<IpcReceiver<u32>>) -> Result<isize> {
