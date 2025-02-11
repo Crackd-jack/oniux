@@ -12,7 +12,7 @@ use std::{
 };
 
 use anyhow::{bail, Result};
-use caps::{CapSet, Capability};
+use caps::{CapSet, Capability, CapsHashSet};
 use clap::Parser;
 use ipc_channel::ipc::IpcReceiver;
 use log::{debug, info};
@@ -46,28 +46,46 @@ struct Args {
     cmd: Vec<String>,
 }
 
-/// Drop all capabilities in all capability sets
+/// Limit the capabilities of the process in case they were too high
 ///
-/// This function panics in case of failure and double-checks if the operation has been successful.
-/// It is intentional, as failures are absolutely not tolerable in this function.
-fn drop_caps() {
-    let cap_sets = [
-        CapSet::Ambient,
-        // CapSet::Bounding,
-        // ^^^^^^^^^^^^^^^^ but why?
-        CapSet::Effective,
-        CapSet::Inheritable,
-        CapSet::Permitted,
-    ];
+/// This function limits the capabilities of the process in case they were too high,
+/// by adjusting all capability sets to the bare minimum required for this software
+/// to function properly.
+///
+/// The calling function only needs to ensure that [`Capability::CAP_SYS_ADMIN`]
+/// and [`Capability::CAP_NET_ADMIN`] are present in [`CapSet::Permitted`].
+///
+/// This function panics in case of a failure and double checks its success,
+/// because failure here is not tolerable.
+///
+/// The function should generally be called as soon as possible and only once.
+fn limit_caps() {
+    let sys_net = CapsHashSet::from([Capability::CAP_SYS_ADMIN, Capability::CAP_NET_ADMIN]);
 
-    // Clear all capabilities
-    for cap in cap_sets {
-        caps::clear(None, cap).unwrap();
+    // `Permitted` and `Effective` obviously need `CAP_SYS_ADMIN` and `CAP_NET_ADMIN`,
+    // because this application and its child processes need to create namespaces
+    // as well as to move network interfaces between namespaces, alongside various
+    // other network stack related operations required elevated capabilities.
+    caps::set(None, CapSet::Permitted, &sys_net).unwrap();
+    caps::set(None, CapSet::Effective, &sys_net).unwrap();
+    assert_eq!(caps::read(None, CapSet::Permitted).unwrap(), sys_net);
+    assert_eq!(caps::read(None, CapSet::Effective).unwrap(), sys_net);
 
-        if !caps::read(None, cap).unwrap().is_empty() {
-            panic!("dropping capabilities failed");
-        }
-    }
+    // `Inheritable` and `Ambiet` are in my (cve) opinion too hard to use properly.
+    // The only benefit that they would offer would be, to launch the onionmasq
+    // binary with the required capabilities, even if the file capabilities are
+    // lower.  This convience feature does not justify the increased security risk
+    // by using them.
+    caps::clear(None, CapSet::Inheritable).unwrap();
+    caps::clear(None, CapSet::Ambient).unwrap();
+    assert_eq!(
+        caps::read(None, CapSet::Inheritable).unwrap(),
+        CapsHashSet::new()
+    );
+    assert_eq!(
+        caps::read(None, CapSet::Ambient).unwrap(),
+        CapsHashSet::new()
+    );
 }
 
 /// Generate an device name
@@ -94,7 +112,7 @@ fn isolation(cmd: &Vec<String>, rx: Arc<IpcReceiver<u32>>) -> Result<isize> {
     netlink::set_up(index)?;
     netlink::set_default_gateway(index, AddressFamily::Inet)?;
     netlink::set_default_gateway(index, AddressFamily::Inet6)?;
-    debug!("finished setting up the device");
+    debug!("finished setting up networking");
 
     // Add DNS support
     mount::mount(
@@ -120,8 +138,8 @@ fn isolation(cmd: &Vec<String>, rx: Arc<IpcReceiver<u32>>) -> Result<isize> {
     )?;
     debug!("mounted /tmp/resolv.conf to /etc/resolv.conf");
 
-    // VERY VERY IMPORTANT
-    drop_caps();
+    caps::clear(None, CapSet::Permitted).unwrap();
+    debug!("cleared all capabilities in isolation process");
 
     let cmd: Vec<CString> = cmd.iter().map(|s| CString::from_str(s).unwrap()).collect();
     unistd::execvp(&cmd[0], &cmd)?;
@@ -129,8 +147,9 @@ fn isolation(cmd: &Vec<String>, rx: Arc<IpcReceiver<u32>>) -> Result<isize> {
 }
 
 fn onionmasq(path: &Path, device: &str) -> Result<isize> {
-    // VERY IMPORTANT
-    drop_caps();
+    // Clear all `Permitted` capabilities for the process.
+    caps::clear(None, CapSet::Permitted).unwrap();
+    debug!("cleared permitted capabilities in onionmasq");
 
     let path = [path.as_os_str().as_bytes(), "\0".as_bytes()].concat();
     let path = CStr::from_bytes_with_nul(&path)?;
@@ -187,7 +206,8 @@ fn main_main() -> Result<isize> {
     tx.send(index)?;
 
     // Parent no longer needs capabilities too
-    drop_caps();
+    caps::clear(None, CapSet::Permitted).unwrap();
+    debug!("cleared permitted capabilities in main process");
 
     match wait::waitpid(isolation_proc, None)? {
         WaitStatus::Exited(_, code) => {
@@ -209,6 +229,8 @@ fn main() -> Result<()> {
     if !caps::has_cap(None, CapSet::Permitted, Capability::CAP_NET_ADMIN)? {
         bail!("not having CAP_NET_ADMIN capability");
     }
+
+    limit_caps();
 
     let mut stack = gen_stack();
     let proc = unsafe {
