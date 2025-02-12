@@ -53,3 +53,15 @@ status will be the exit code of itself.
 Last but not least, the original process that has been in a `waitpid(2)` state
 since early on returns, returning the status yielded by the root process yielded
 by the isolation process.
+
+```mermaid
+graph LR
+    A[Original Process] -- waitpid(2) <--> B
+    subgraph root[PID namespace]
+    subgraph isolation[net & mnt namespace]
+    C[Isolation Process]
+    end
+    B[Root Process] -- waitpid(2) <--> C[Isolation Process]
+    B --> D[onionmasq]
+    end
+```
