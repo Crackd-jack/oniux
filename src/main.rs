@@ -129,6 +129,10 @@ fn isolation(cmd: &Vec<String>, rx: Arc<IpcReceiver<u32>>) -> Result<isize> {
     drop(resolv_conf);
     debug!("created /tmp/resolv.conf");
 
+    // This is required, so that all mounts done inside are not propagated to the root mnt ns.
+    mount::mount(Some(""), "/", Some(""), MsFlags::MS_PRIVATE, Some("")).unwrap();
+    debug!("mounted / with MS_PRIVATE");
+
     mount::mount(
         Some("/tmp/resolv.conf"),
         "/etc/resolv.conf",
