@@ -2,8 +2,8 @@
 
 *oniux* is a tool that utilizes various Linux `namespaces(7)` in order to isolate
 an arbitrary application over the Tor network.  To achieve this, it makes heavy
-use of the [onionmasq](https://gitlab.torproject.org), which offers a TUN device
-to send Tor traffic through.
+use of the [onionmasq](https://gitlab.torproject.org/cve/oniux), which offers
+a TUN device to send Tor traffic through.
 
 ## Usage
 
