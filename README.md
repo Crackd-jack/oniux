@@ -9,8 +9,8 @@ a TUN device to send Tor traffic through.
 
 ```sh
 cargo build
-sudo setcap cap_net_admin,cap_sys_admin+ep ./target/debug/oniux
-./target/debug/oniux --onionmasq /path/to/onionmasq/binary curl https://amiusingtor.net
+sudo setcap cap_net_admin,cap_sys_admin=ep ./target/debug/oniux
+./target/debug/oniux curl https://amiusingtor.net
 ```
 
 ## Internal Workings
@@ -20,12 +20,11 @@ crashes do not leak any zombie processes.  After that, the original parent waits
 in a `waitpid(2)` until the actual child, which is the PID1 of the PID namespace,
 terminates.  This PID1 process will from now on be referred to as the "root process".
 
-The root process than `clone(2) + execv(2)` itself and launches an instance of `onionmasq`.
-After the `clone(2)` but before the `execv(2)`, it of course drops all permitted
-capabilities in the process, so that the final capabilities of the `onionmasq` process
-only depend upon the file capability set for the `onionmasq` binary.
+The root process then `clone(2)` itself and launches an `onion_tunnel` helper process
+inside a blocking Tokio runtime.  Before, it drops the `CAP_SYS_ADMIN` capability,
+as it is no longer required for the operation of an `onion_tunnel`.
 
-Once that is done, `oniux` waits a short amount of time until `onionmasq` has setted
+Once that is done, `oniux` waits a short amount of time until `onion_tunnel` has setted
 up the TUN interface `onion0`, after which it will create the isolation process,
 which is later going to be responsible for actually executing the final binary.
 The isolation process has its own network and mount namespace.
@@ -38,7 +37,7 @@ has been successfully moved.
 From there on, the isolation process takes over control.  It first configures the
 `onion0` interface via netlink (setting it up, adding IPs, ...) and mounts a
 custom `/etc/resolv.conf` afterwards, indicating the operating system to perform
-DNS resolves only through the onionmasq resolver listening on `169.254.42.53`.
+DNS resolves only through the onion tunnel resolver listening on `169.254.42.53`.
 
 Once both of these privileged steps have been done, the isolation process clears
 all of its permitted capabilities, so that the capabilities of the isolation binary
@@ -62,6 +61,6 @@ graph LR
     C[Isolation Process]
     end
     B[Root Process] -- waitpid(2) <--> C[Isolation Process]
-    B --> D[onionmasq]
+    B --> D[onion_tunnel]
     end
 ```
