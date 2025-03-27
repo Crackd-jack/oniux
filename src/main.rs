@@ -31,6 +31,9 @@ mod netlink;
 /// The size of the stacks of our child processes
 const STACK_SIZE: usize = 1000 * 1000 * 8;
 
+/// The name of the TUN device
+const DEVICE_NAME: &str = "onion0";
+
 #[derive(Parser, Debug)]
 struct Args {
     /// The actual program to execute
@@ -74,11 +77,6 @@ fn limit_caps() {
         caps::read(None, CapSet::Ambient).unwrap(),
         CapsHashSet::new()
     );
-}
-
-/// Generate an device name
-fn gen_device_name() -> String {
-    "onion0".into()
 }
 
 /// Generate an empty stack for calls to `clone(2)`
@@ -170,12 +168,10 @@ fn main_main(args: &Args) -> Result<isize> {
     )?;
     debug!("mounted /proc");
 
-    let device = gen_device_name();
-
     let mut onion_tunnel_stack = gen_stack();
     let onion_tunnel_proc = unsafe {
         sched::clone(
-            Box::new(|| onion_tunnel(&device).unwrap()),
+            Box::new(|| onion_tunnel(DEVICE_NAME).unwrap()),
             &mut onion_tunnel_stack,
             CloneFlags::empty(),
             None,
@@ -191,8 +187,8 @@ fn main_main(args: &Args) -> Result<isize> {
     thread::sleep(Duration::from_millis(500));
     debug!("waited 500ms for onion tunnel to start up");
 
-    let index = netlink::get_index(&device)?;
-    debug!("found {device} interface with index {index}");
+    let index = netlink::get_index(DEVICE_NAME)?;
+    debug!("found {DEVICE_NAME} interface with index {index}");
 
     let (tx, rx) = ipc_channel::ipc::channel::<u32>()?;
     let rx = Arc::new(rx);
