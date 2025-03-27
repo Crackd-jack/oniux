@@ -1,10 +1,8 @@
 use std::{
-    ffi::{CStr, CString},
+    ffi::CString,
     fs::File,
     io::Write,
     net::{IpAddr, Ipv4Addr, Ipv6Addr},
-    os::unix::ffi::OsStrExt,
-    path::{Path, PathBuf},
     process::{self},
     str::FromStr,
     sync::Arc,
@@ -19,16 +17,14 @@ use log::{debug, info};
 use netlink_packet_route::AddressFamily;
 use nix::mount::{self, MsFlags};
 use nix::{
-    fcntl::{self, OFlag},
     libc,
     sched::{self, CloneFlags},
-    sys::{
-        stat::Mode,
-        wait::{self, WaitStatus},
-    },
+    sys::wait::{self, WaitStatus},
     unistd::{self},
 };
+use onion_tunnel::{config::TunnelConfig, scaffolding::LinuxScaffolding, OnionTunnel};
 use std::thread;
+use tokio::runtime::Runtime;
 
 mod netlink;
 
@@ -37,10 +33,6 @@ const STACK_SIZE: usize = 1000 * 1000 * 8;
 
 #[derive(Parser, Debug)]
 struct Args {
-    /// Path to the onionmasq binary
-    #[arg(long, default_value = "onionmasq")]
-    onionmasq: PathBuf,
-
     /// The actual program to execute
     #[arg(trailing_var_arg = true, required = true)]
     cmd: Vec<String>,
@@ -72,10 +64,6 @@ fn limit_caps() {
     assert_eq!(caps::read(None, CapSet::Effective).unwrap(), sys_net);
 
     // `Inheritable` and `Ambiet` are in my (cve) opinion too hard to use properly.
-    // The only benefit that they would offer would be, to launch the onionmasq
-    // binary with the required capabilities, even if the file capabilities are
-    // lower.  This convience feature does not justify the increased security risk
-    // by using them.
     caps::clear(None, CapSet::Inheritable).unwrap();
     caps::clear(None, CapSet::Ambient).unwrap();
     assert_eq!(
@@ -150,23 +138,24 @@ fn isolation(cmd: &Vec<String>, rx: Arc<IpcReceiver<u32>>) -> Result<isize> {
     unreachable!()
 }
 
-fn onionmasq(path: &Path, device: &str) -> Result<isize> {
-    // Clear all `Permitted` capabilities for the process.
-    caps::clear(None, CapSet::Permitted).unwrap();
-    debug!("cleared permitted capabilities in onionmasq");
+fn onion_tunnel(device: &str) -> Result<isize> {
+    caps::drop(None, CapSet::Effective, Capability::CAP_SYS_ADMIN)?;
+    caps::drop(None, CapSet::Permitted, Capability::CAP_SYS_ADMIN)?;
+    debug!("dropped CAP_SYS_ADMIN in onion tunnel");
 
-    let path = [path.as_os_str().as_bytes(), "\0".as_bytes()].concat();
-    let path = CStr::from_bytes_with_nul(&path)?;
+    let rt = Runtime::new()?;
+    rt.block_on(async {
+        let can_mark = LinuxScaffolding::can_mark();
+        let scaffolding = LinuxScaffolding {
+            can_mark,
+            cc: None,
+            log_connections: false,
+        };
+        let mut onion_tunnel =
+            OnionTunnel::new(scaffolding, device, TunnelConfig::default()).await?;
 
-    let args: Vec<CString> = vec![path.into(), CString::new("-d")?, CString::new(device)?];
-
-    // Redirect stdin, stdout, and stderr to `/dev/null`
-    let nullfd = fcntl::open("/dev/null", OFlag::O_RDWR, Mode::empty())?;
-    unistd::dup2(nullfd, 0)?;
-    unistd::dup2(nullfd, 1)?;
-    unistd::dup2(nullfd, 2)?;
-
-    unistd::execv(path, &args)?;
+        onion_tunnel.run().await
+    })?;
     unreachable!()
 }
 
@@ -177,18 +166,24 @@ fn main_main() -> Result<isize> {
 
     let device = gen_device_name();
 
-    let mut onionmasq_stack = gen_stack();
-    let onionmasq_proc = unsafe {
+    let mut onion_tunnel_stack = gen_stack();
+    let onion_tunnel_proc = unsafe {
         sched::clone(
-            Box::new(|| onionmasq(&args.onionmasq, &device).unwrap()),
-            &mut onionmasq_stack,
+            Box::new(|| onion_tunnel(&device).unwrap()),
+            &mut onion_tunnel_stack,
             CloneFlags::empty(),
             None,
         )?
     };
-    debug!("spawned onionmasq with PID {}", onionmasq_proc.as_raw());
+
+    // TODO: It would be really nice if we could somehow let onion tunnel communicate
+    // when it is ready, rather than waiting 500ms on a shady trust me basis.
+    debug!(
+        "spawned onion tunnel with PID {}",
+        onion_tunnel_proc.as_raw()
+    );
     thread::sleep(Duration::from_millis(500));
-    debug!("waited 500ms for onionmasq to start up");
+    debug!("waited 500ms for onion tunnel to start up");
 
     let index = netlink::get_index(&device)?;
     debug!("found {device} interface with index {index}");
