@@ -159,13 +159,7 @@ fn onion_tunnel(device: &str) -> Result<isize> {
     unreachable!()
 }
 
-fn main_main() -> Result<isize> {
-    env_logger::init();
-
-    let args = Args::parse();
-
-    let device = gen_device_name();
-
+fn main_main(args: &Args) -> Result<isize> {
     // The first thing a PID namespace needs is to have /proc remounted
     mount::mount(
         Some("proc"),
@@ -175,6 +169,8 @@ fn main_main() -> Result<isize> {
         None::<&str>,
     )?;
     debug!("mounted /proc");
+
+    let device = gen_device_name();
 
     let mut onion_tunnel_stack = gen_stack();
     let onion_tunnel_proc = unsafe {
@@ -231,6 +227,8 @@ fn main_main() -> Result<isize> {
 }
 
 fn main() -> Result<()> {
+    env_logger::init();
+
     // Check the capabilities
     if !caps::has_cap(None, CapSet::Permitted, Capability::CAP_SYS_ADMIN)? {
         bail!("not having CAP_SYS_ADMIN capability");
@@ -238,13 +236,16 @@ fn main() -> Result<()> {
     if !caps::has_cap(None, CapSet::Permitted, Capability::CAP_NET_ADMIN)? {
         bail!("not having CAP_NET_ADMIN capability");
     }
+    debug!("checked capabilities");
 
     limit_caps();
+    debug!("limited capabilities");
 
+    let args = Args::parse();
     let mut stack = gen_stack();
     let proc = unsafe {
         sched::clone(
-            Box::new(|| main_main().unwrap()),
+            Box::new(|| main_main(&args).unwrap()),
             &mut stack,
             CloneFlags::CLONE_NEWPID | CloneFlags::CLONE_NEWNS,
             Some(libc::SIGCHLD),
