@@ -56,7 +56,7 @@ by the isolation process.
 ```mermaid
 graph LR
     A[Original Process] -- waitpid(2) <--> B
-    subgraph root[PID namespace]
+    subgraph root[PID & mnt namespace]
     subgraph isolation[net & mnt namespace]
     C[Isolation Process]
     end

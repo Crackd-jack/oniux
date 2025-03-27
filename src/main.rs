@@ -166,6 +166,16 @@ fn main_main() -> Result<isize> {
 
     let device = gen_device_name();
 
+    // The first thing a PID namespace needs is to have /proc remounted
+    mount::mount(
+        Some("proc"),
+        "/proc",
+        Some("proc"),
+        MsFlags::MS_NOSUID | MsFlags::MS_NOEXEC | MsFlags::MS_NODEV,
+        None::<&str>,
+    )?;
+    debug!("mounted /proc");
+
     let mut onion_tunnel_stack = gen_stack();
     let onion_tunnel_proc = unsafe {
         sched::clone(
@@ -236,7 +246,7 @@ fn main() -> Result<()> {
         sched::clone(
             Box::new(|| main_main().unwrap()),
             &mut stack,
-            CloneFlags::CLONE_NEWPID,
+            CloneFlags::CLONE_NEWPID | CloneFlags::CLONE_NEWNS,
             Some(libc::SIGCHLD),
         )
     }?;
