@@ -1,8 +1,8 @@
 use std::{
     ffi::CString,
-    fs::File,
     io::Write,
     net::{IpAddr, Ipv4Addr, Ipv6Addr},
+    path::PathBuf,
     process::{self},
     str::FromStr,
     sync::Arc,
@@ -15,7 +15,6 @@ use clap::Parser;
 use ipc_channel::ipc::IpcReceiver;
 use log::{debug, info};
 use netlink_packet_route::AddressFamily;
-use nix::mount::{self, MsFlags};
 use nix::{
     libc,
     sched::{self, CloneFlags},
@@ -24,8 +23,10 @@ use nix::{
 };
 use onion_tunnel::{config::TunnelConfig, scaffolding::LinuxScaffolding, OnionTunnel};
 use std::thread;
+use tempfile::NamedTempFile;
 use tokio::runtime::Runtime;
 
+mod mount;
 mod netlink;
 
 /// The size of the stacks of our child processes
@@ -85,6 +86,19 @@ fn gen_stack() -> Vec<u8> {
 }
 
 fn isolation(cmd: &Vec<String>, rx: Arc<IpcReceiver<u32>>) -> Result<isize> {
+    mount::init_namespace()?;
+    debug!("initialized the isolation mount namespace");
+
+    let mut resolv_conf = NamedTempFile::new()?;
+    resolv_conf.write_all("nameserver 169.254.42.53\nnameserver fe80::53\n".as_bytes())?;
+    debug!(
+        "created temporary resolv.conf(5) at {:?}",
+        resolv_conf.path()
+    );
+
+    mount::bind(resolv_conf.path(), &PathBuf::from("/etc/resolv.conf"))?;
+    debug!("mounted {:?} to /etc/resolv.conf", resolv_conf.path());
+
     // Wait until our parent has set up everything nicely
     let index = rx.recv()?;
 
@@ -99,34 +113,6 @@ fn isolation(cmd: &Vec<String>, rx: Arc<IpcReceiver<u32>>) -> Result<isize> {
     netlink::set_default_gateway(index, AddressFamily::Inet)?;
     netlink::set_default_gateway(index, AddressFamily::Inet6)?;
     debug!("finished setting up networking");
-
-    // Add DNS support
-    mount::mount(
-        Some(""),
-        "/tmp",
-        Some("tmpfs"),
-        MsFlags::MS_PRIVATE,
-        Some(""),
-    )?;
-    debug!("mounted /tmp");
-
-    let mut resolv_conf = File::create("/tmp/resolv.conf")?;
-    resolv_conf.write_all("nameserver 169.254.42.53\nnameserver fe80::53\n".as_bytes())?;
-    drop(resolv_conf);
-    debug!("created /tmp/resolv.conf");
-
-    // This is required, so that all mounts done inside are not propagated to the root mnt ns.
-    mount::mount(Some(""), "/", Some(""), MsFlags::MS_PRIVATE, Some("")).unwrap();
-    debug!("mounted / with MS_PRIVATE");
-
-    mount::mount(
-        Some("/tmp/resolv.conf"),
-        "/etc/resolv.conf",
-        Some(""),
-        MsFlags::MS_BIND | MsFlags::MS_PRIVATE,
-        Some(""),
-    )?;
-    debug!("mounted /tmp/resolv.conf to /etc/resolv.conf");
 
     caps::clear(None, CapSet::Permitted).unwrap();
     debug!("cleared all capabilities in isolation process");
@@ -158,15 +144,10 @@ fn onion_tunnel(device: &str) -> Result<isize> {
 }
 
 fn main_main(args: &Args) -> Result<isize> {
-    // The first thing a PID namespace needs is to have /proc remounted
-    mount::mount(
-        Some("proc"),
-        "/proc",
-        Some("proc"),
-        MsFlags::MS_NOSUID | MsFlags::MS_NOEXEC | MsFlags::MS_NODEV,
-        None::<&str>,
-    )?;
-    debug!("mounted /proc");
+    mount::init_namespace()?;
+    debug!("initialized the main mount namespace");
+    mount::procfs(&PathBuf::from("/proc"))?;
+    debug!("mounted procfs in main mount namespace");
 
     let mut onion_tunnel_stack = gen_stack();
     let onion_tunnel_proc = unsafe {
