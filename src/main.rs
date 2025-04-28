@@ -4,8 +4,8 @@ use std::{
     net::{IpAddr, Ipv4Addr, Ipv6Addr},
     path::PathBuf,
     process::{self},
+    rc::Rc,
     str::FromStr,
-    sync::Arc,
     time::Duration,
 };
 
@@ -85,7 +85,7 @@ fn gen_stack() -> Vec<u8> {
     vec![0u8; STACK_SIZE]
 }
 
-fn isolation(cmd: &Vec<String>, rx: Arc<IpcReceiver<u32>>) -> Result<isize> {
+fn isolation(cmd: &[String], rx: Rc<IpcReceiver<u32>>) -> Result<isize> {
     mount::init_namespace()?;
     debug!("initialized the isolation mount namespace");
 
@@ -172,7 +172,7 @@ fn main_main(args: &Args) -> Result<isize> {
     debug!("found {DEVICE_NAME} interface with index {index}");
 
     let (tx, rx) = ipc_channel::ipc::channel::<u32>()?;
-    let rx = Arc::new(rx);
+    let rx = Rc::new(rx);
     let mut isolation_stack = gen_stack();
     let isolation_proc = unsafe {
         sched::clone(
