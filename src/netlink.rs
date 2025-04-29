@@ -127,37 +127,6 @@ pub fn set_up(index: u32) -> Result<()> {
     Ok(())
 }
 
-/// Move the network device to the network namespace of `pid`
-pub fn set_ns(index: u32, pid: u32) -> Result<()> {
-    let mut socket = create_socket(NETLINK_ROUTE)?;
-    debug!("created netlink socket to move {index} to NS of {pid}");
-
-    let mut link_msg = LinkMessage::default();
-    link_msg.header.index = index;
-    link_msg.attributes.push(LinkAttribute::NetNsPid(pid));
-    let mut msg = NetlinkMessage::new(
-        NetlinkHeader::default(),
-        NetlinkPayload::from(RouteNetlinkMessage::SetLink(link_msg)),
-    );
-    msg.header.flags = NLM_F_REQUEST | NLM_F_ACK | NLM_F_EXCL | NLM_F_CREATE;
-    msg.finalize();
-
-    send(&mut socket, &msg)?;
-    let resp: NetlinkMessage<RouteNetlinkMessage> = recv(&mut socket)?;
-
-    // Check for errors (ACK is Error with code zero)
-    match resp.payload {
-        NetlinkPayload::Error(ErrorMessage { code: None, .. }) => {}
-        e => bail!(
-            "netlink failed for unknown reasons moving {index} to NS of {pid} {:#?}",
-            e
-        ),
-    }
-    debug!("moved interface {index} to NS of {pid}");
-
-    Ok(())
-}
-
 /// Add `addr` to interface `index`
 pub fn add_address(index: u32, addr: IpAddr, prefix_len: u8) -> Result<()> {
     let mut socket = create_socket(NETLINK_ROUTE)?;

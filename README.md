@@ -1,66 +1,24 @@
 # oniux
 
+**This is still considered experimental software!**
+
 *oniux* is a tool that utilizes various Linux `namespaces(7)` in order to isolate
 an arbitrary application over the Tor network.  To achieve this, it makes heavy
-use of the [onionmasq](https://gitlab.torproject.org/cve/oniux), which offers
-a TUN device to send Tor traffic through.
+use of the [onionmasq](https://gitlab.torproject.org/tpo/core/onionmasq), which
+offers a TUN device to send Tor traffic through.
 
 ## Usage
 
 ```sh
 cargo build
-sudo setcap cap_net_admin,cap_sys_admin=ep ./target/debug/oniux
 ./target/debug/oniux curl https://amiusingtor.net
 ```
 
 ## Internal Workings
 
-*oniux* works by creating a copy of itself in a new PID namespace, so that unexpected
-crashes do not leak any zombie processes.  After that, the original parent waits
-in a `waitpid(2)` until the actual child, which is the PID1 of the PID namespace,
-terminates.  This PID1 process will from now on be referred to as the "root process".
+**TODO**
 
-The root process then `clone(2)` itself and launches an `onion_tunnel` helper process
-inside a blocking Tokio runtime.  Before, it drops the `CAP_SYS_ADMIN` capability,
-as it is no longer required for the operation of an `onion_tunnel`.
+## Credits
 
-Once that is done, `oniux` waits a short amount of time until `onion_tunnel` has setted
-up the TUN interface `onion0`, after which it will create the isolation process,
-which is later going to be responsible for actually executing the final binary.
-The isolation process has its own network and mount namespace.
-
-Upon the creation of the isolation process, the root process then moves the `onion0`
-interface into the network namespace of the isolation process.  Afterwards, it
-sends a short IPC message to the isolation process, signaling that the interface
-has been successfully moved.
-
-From there on, the isolation process takes over control.  It first configures the
-`onion0` interface via netlink (setting it up, adding IPs, ...) and mounts a
-custom `/etc/resolv.conf` afterwards, indicating the operating system to perform
-DNS resolves only through the onion tunnel resolver listening on `169.254.42.53`.
-
-Once both of these privileged steps have been done, the isolation process clears
-all of its permitted capabilities, so that the capabilities of the isolation binary
-only depend upon its file capability set.
-
-At this point in time, the isolation process `execv(2)`'s the command given to the
-program via the command line.
-
-The root process waits until the termination of the isolation process, whose
-status will be the exit code of itself.
-
-Last but not least, the original process that has been in a `waitpid(2)` state
-since early on returns, returning the status yielded by the root process yielded
-by the isolation process.
-
-```mermaid
-graph LR
-    A[Original Process] -- waitpid(2) <--> B
-    subgraph root[PID & mnt namespace]
-    subgraph isolation[net & mnt namespace]
-    C[Isolation Process]
-    end
-    B[Root Process] -- waitpid(2) <--> C[Isolation Process]
-    B --> D[onion_tunnel]
-    end
-```
+Many thanks go to `7ppKb5bW`, who taught me on how this can implemented without
+the use of `capabilities(7)` by using `user_namespaces(7)` properly.

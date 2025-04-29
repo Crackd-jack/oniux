@@ -1,33 +1,36 @@
 use std::{
-    ffi::CString,
     io::Write,
     net::{IpAddr, Ipv4Addr, Ipv6Addr},
+    os::{
+        fd::{AsRawFd, FromRawFd, OwnedFd},
+        unix::net::UnixDatagram,
+    },
     path::PathBuf,
-    process::{self},
-    rc::Rc,
-    str::FromStr,
+    process::{Command, ExitCode, ExitStatus},
+    thread,
     time::Duration,
 };
 
-use anyhow::{bail, Result};
-use caps::{CapSet, Capability, CapsHashSet};
+use anyhow::Result;
+use caps::CapSet;
 use clap::Parser;
-use ipc_channel::ipc::IpcReceiver;
-use log::{debug, info};
+use log::debug;
 use netlink_packet_route::AddressFamily;
 use nix::{
     libc,
     sched::{self, CloneFlags},
     sys::wait::{self, WaitStatus},
-    unistd::{self},
+    unistd::{Gid, Uid},
 };
 use onion_tunnel::{config::TunnelConfig, scaffolding::LinuxScaffolding, OnionTunnel};
-use std::thread;
+use sendfd::{RecvWithFd, SendWithFd};
+use smoltcp::phy::{Medium, TunTapInterface};
 use tempfile::NamedTempFile;
 use tokio::runtime::Runtime;
 
 mod mount;
 mod netlink;
+mod user;
 
 /// The size of the stacks of our child processes
 const STACK_SIZE: usize = 1000 * 1000 * 8;
@@ -42,67 +45,37 @@ struct Args {
     cmd: Vec<String>,
 }
 
-/// Limit the capabilities of the process in case they were too high
-///
-/// This function limits the capabilities of the process in case they were too high,
-/// by adjusting all capability sets to the bare minimum required for this software
-/// to function properly.
-///
-/// The calling function only needs to ensure that [`Capability::CAP_SYS_ADMIN`]
-/// and [`Capability::CAP_NET_ADMIN`] are present in [`CapSet::Permitted`].
-///
-/// This function panics in case of a failure and double checks its success,
-/// because failure here is not tolerable.
-///
-/// The function should generally be called as soon as possible and only once.
-fn limit_caps() {
-    let sys_net = CapsHashSet::from([Capability::CAP_SYS_ADMIN, Capability::CAP_NET_ADMIN]);
-
-    // `Permitted` and `Effective` obviously need `CAP_SYS_ADMIN` and `CAP_NET_ADMIN`,
-    // because this application and its child processes need to create namespaces
-    // as well as to move network interfaces between namespaces, alongside various
-    // other network stack related operations required elevated capabilities.
-    caps::set(None, CapSet::Permitted, &sys_net).unwrap();
-    caps::set(None, CapSet::Effective, &sys_net).unwrap();
-    assert_eq!(caps::read(None, CapSet::Permitted).unwrap(), sys_net);
-    assert_eq!(caps::read(None, CapSet::Effective).unwrap(), sys_net);
-
-    // `Inheritable` and `Ambiet` are in my (cve) opinion too hard to use properly.
-    caps::clear(None, CapSet::Inheritable).unwrap();
-    caps::clear(None, CapSet::Ambient).unwrap();
-    assert_eq!(
-        caps::read(None, CapSet::Inheritable).unwrap(),
-        CapsHashSet::new()
-    );
-    assert_eq!(
-        caps::read(None, CapSet::Ambient).unwrap(),
-        CapsHashSet::new()
-    );
-}
-
 /// Generate an empty stack for calls to `clone(2)`
 fn gen_stack() -> Vec<u8> {
     vec![0u8; STACK_SIZE]
 }
 
-fn isolation(cmd: &[String], rx: Rc<IpcReceiver<u32>>) -> Result<isize> {
+fn isolation(parent: UnixDatagram, uid: Uid, gid: Gid, cmd: &[String]) -> Result<ExitStatus> {
+    // Initialize the mount namespace properly.
     mount::init_namespace()?;
-    debug!("initialized the isolation mount namespace");
+    mount::procfs(&PathBuf::from("/proc"))?;
+    debug!("finished mount namespace setup");
 
+    // Perform UID and GID mappings.
+    user::setgroups(false)?;
+    user::uid_map(uid, uid)?;
+    user::gid_map(gid, gid)?;
+    debug!("finished user namespace mappings");
+
+    // Overwrite `/etc/resolv.conf` with a bind mound to use the nameservers
+    // provided by onionmasq.
     let mut resolv_conf = NamedTempFile::new()?;
     resolv_conf.write_all("nameserver 169.254.42.53\nnameserver fe80::53\n".as_bytes())?;
     debug!(
         "created temporary resolv.conf(5) at {:?}",
         resolv_conf.path()
     );
-
     mount::bind(resolv_conf.path(), &PathBuf::from("/etc/resolv.conf"))?;
     debug!("mounted {:?} to /etc/resolv.conf", resolv_conf.path());
 
-    // Wait until our parent has set up everything nicely
-    let index = rx.recv()?;
-
-    // Configure the IP addresses of the interface
+    // Create and configure a TUN interface for use with onionmasq.
+    let tun = TunTapInterface::new(DEVICE_NAME, Medium::Ip)?;
+    let index = netlink::get_index(DEVICE_NAME)?;
     netlink::add_address(index, IpAddr::V4(Ipv4Addr::new(169, 254, 42, 1)), 24)?;
     netlink::add_address(
         index,
@@ -114,123 +87,101 @@ fn isolation(cmd: &[String], rx: Rc<IpcReceiver<u32>>) -> Result<isize> {
     netlink::set_default_gateway(index, AddressFamily::Inet6)?;
     debug!("finished setting up networking");
 
-    caps::clear(None, CapSet::Permitted).unwrap();
-    debug!("cleared all capabilities in isolation process");
+    // Drop all capabilities.
+    caps::clear(None, CapSet::Permitted)?;
+    caps::clear(None, CapSet::Effective)?;
+    caps::clear(None, CapSet::Inheritable)?;
+    caps::clear(None, CapSet::Ambient)?;
+    debug!("dropped all capabilites");
 
-    let cmd: Vec<CString> = cmd.iter().map(|s| CString::from_str(s).unwrap()).collect();
-    unistd::execvp(&cmd[0], &cmd)?;
-    unreachable!()
+    // Send the device to the parent.
+    parent.send_with_fd(&[0; 1024], &[tun.as_raw_fd()])?;
+    drop(tun);
+    debug!("sent TUN device");
+
+    // The 100ms is a rather arbitrary timeout, but it probably does not hurt
+    // to wait until the parent has received the file descriptor and launched
+    // the onion-tunnel thread.
+    // TODO: Consider using IPC here to indicate that we can continue although
+    // that might be a little bit overkill.
+    thread::sleep(Duration::from_millis(100));
+
+    // Run the actual child and wait for its termination.
+    // It is important to not use something like `execve` or anything that else
+    // that could hinder the execution of Rust Drop traits, as otherwise the
+    // `resolv_conf` file will leak into the temporary directory.
+    let mut child = Command::new(&cmd[0]).args(&cmd[1..]).spawn()?;
+    Ok(child.wait()?)
 }
 
-fn onion_tunnel(device: &str) -> Result<isize> {
-    caps::drop(None, CapSet::Effective, Capability::CAP_SYS_ADMIN)?;
-    caps::drop(None, CapSet::Permitted, Capability::CAP_SYS_ADMIN)?;
-    debug!("dropped CAP_SYS_ADMIN in onion tunnel");
-
-    let rt = Runtime::new()?;
-    rt.block_on(async {
-        let can_mark = LinuxScaffolding::can_mark();
-        let scaffolding = LinuxScaffolding {
-            can_mark,
-            cc: None,
-            log_connections: false,
-        };
-        let mut onion_tunnel =
-            OnionTunnel::new(scaffolding, device, TunnelConfig::default()).await?;
-
-        onion_tunnel.run().await
-    })?;
-    unreachable!()
-}
-
-fn main_main(args: &Args) -> Result<isize> {
-    mount::init_namespace()?;
-    debug!("initialized the main mount namespace");
-    mount::procfs(&PathBuf::from("/proc"))?;
-    debug!("mounted procfs in main mount namespace");
-
-    let mut onion_tunnel_stack = gen_stack();
-    let onion_tunnel_proc = unsafe {
-        sched::clone(
-            Box::new(|| onion_tunnel(DEVICE_NAME).unwrap()),
-            &mut onion_tunnel_stack,
-            CloneFlags::empty(),
-            None,
-        )?
-    };
-
-    // TODO: It would be really nice if we could somehow let onion tunnel communicate
-    // when it is ready, rather than waiting 500ms on a shady trust me basis.
-    debug!(
-        "spawned onion tunnel with PID {}",
-        onion_tunnel_proc.as_raw()
-    );
-    thread::sleep(Duration::from_millis(500));
-    debug!("waited 500ms for onion tunnel to start up");
-
-    let index = netlink::get_index(DEVICE_NAME)?;
-    debug!("found {DEVICE_NAME} interface with index {index}");
-
-    let (tx, rx) = ipc_channel::ipc::channel::<u32>()?;
-    let rx = Rc::new(rx);
-    let mut isolation_stack = gen_stack();
-    let isolation_proc = unsafe {
-        sched::clone(
-            Box::new(move || isolation(&args.cmd, rx.clone()).unwrap()),
-            &mut isolation_stack,
-            CloneFlags::CLONE_NEWNS | CloneFlags::CLONE_NEWNET,
-            Some(libc::SIGCHLD),
-        )?
-    };
-    debug!("spawned isolation with PID {}", isolation_proc.as_raw());
-
-    netlink::set_ns(index, isolation_proc.as_raw() as u32)?;
-    tx.send(index)?;
-
-    // Parent no longer needs capabilities too
-    caps::clear(None, CapSet::Permitted).unwrap();
-    debug!("cleared permitted capabilities in main process");
-
-    match wait::waitpid(isolation_proc, None)? {
-        WaitStatus::Exited(_, code) => {
-            info!("isolated process exited with {code}");
-            process::exit(code);
-        }
-        res => {
-            info!("isolated process exited with {:?}", res);
-            process::exit(1);
-        }
-    }
-}
-
-fn main() -> Result<()> {
+fn main() -> Result<ExitCode> {
+    // Initialize the application.
     env_logger::init();
-
-    // Check the capabilities
-    if !caps::has_cap(None, CapSet::Permitted, Capability::CAP_SYS_ADMIN)? {
-        bail!("not having CAP_SYS_ADMIN capability");
-    }
-    if !caps::has_cap(None, CapSet::Permitted, Capability::CAP_NET_ADMIN)? {
-        bail!("not having CAP_NET_ADMIN capability");
-    }
-    debug!("checked capabilities");
-
-    limit_caps();
-    debug!("limited capabilities");
-
     let args = Args::parse();
+
+    // Create IPC primitives.
+    let (parent, child) = UnixDatagram::pair()?;
+
+    // Obtain user information.
+    let uid = Uid::current();
+    let gid = Gid::current();
+
     let mut stack = gen_stack();
     let proc = unsafe {
         sched::clone(
-            Box::new(|| main_main(&args).unwrap()),
+            Box::new(|| {
+                // This statement looks a bit complicated but all it does is
+                // converting `Result<ExitStatus, Error>` to `isize`.
+                isolation(parent.try_clone().unwrap(), uid, gid, &args.cmd)
+                    .unwrap()
+                    .code()
+                    .unwrap_or(1)
+                    .try_into()
+                    .unwrap()
+            }),
             &mut stack,
-            CloneFlags::CLONE_NEWPID | CloneFlags::CLONE_NEWNS,
+            CloneFlags::CLONE_NEWNET
+                | CloneFlags::CLONE_NEWNS
+                | CloneFlags::CLONE_NEWPID
+                | CloneFlags::CLONE_NEWUSER,
             Some(libc::SIGCHLD),
         )
     }?;
+    drop(parent);
 
+    // Receive file descriptor.
+    let mut fds = [-1];
+    let (_, nfds) = child.recv_with_fd(&mut [0; 1024], &mut fds)?;
+    assert_eq!(nfds, 1);
+    assert_ne!(fds[0], -1);
+    let tun = unsafe { OwnedFd::from_raw_fd(fds[0]) };
+    debug!("received TUN file descriptor");
+
+    // Spawn task to handle the TUN device in.
+    // Maybe we could use `Runtime::spawn` instead, but spawning the task
+    // ourselves in combinating with `Runtime::block_on` gives me a more fuzzy
+    // feeling in terms of control.
+    thread::spawn(|| {
+        Runtime::new().unwrap().block_on(async move {
+            let can_mark = LinuxScaffolding::can_mark();
+            let scaffolding = LinuxScaffolding {
+                can_mark,
+                cc: None,
+                log_connections: false,
+            };
+            let mut tunnel = OnionTunnel::create_with_fd(scaffolding, tun, TunnelConfig::default())
+                .await
+                .unwrap();
+
+            tunnel.run().await
+        })
+    });
+    debug!("spawned onion-tunnel thread");
+
+    // Wait until the isolation process `proc` has finished and return its
+    // status as an `ExitCode`.
     match wait::waitpid(proc, None)? {
-        WaitStatus::Exited(_, code) => process::exit(code),
-        _ => process::exit(1),
+        WaitStatus::Exited(_, code) => Ok(ExitCode::from(u8::try_from(code)?)),
+        _ => Ok(ExitCode::FAILURE),
     }
 }
