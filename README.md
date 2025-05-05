@@ -14,6 +14,11 @@ cargo build
 ./target/debug/oniux curl https://amiusingtor.net
 ```
 
+Running *oniux* will require the `tun` kernel module.  Usually, it should be
+loaded by default in most Linux distributions, but if you get a `File not found`
+error while running *oniux*, you may want to do a `modprobe tun` and run *oniux*
+again.
+
 ## Internal Workings
 
 *oniux* works by immediately spawning a child process using the `clone(2)`
