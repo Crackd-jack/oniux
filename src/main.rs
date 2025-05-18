@@ -133,11 +133,12 @@ fn main() -> Result<ExitCode> {
                 // This statement looks a bit complicated but all it does is
                 // converting `Result<ExitStatus, Error>` to `isize`.
                 isolation(parent.try_clone().unwrap(), uid, gid, &args.cmd)
-                    .unwrap()
-                    .code()
-                    .unwrap_or(1)
+                    .map(|exit_status| exit_status.code().unwrap_or(1))
+                    // fail with status 127 if we failed to spawn the process
+                    .inspect_err(|e| eprintln!("failed to spawn command: {e}"))
+                    .unwrap_or(127)
                     .try_into()
-                    .unwrap()
+                    .unwrap() // all i32 are be castable to isize on 32/64b platforms
             }),
             &mut stack,
             CloneFlags::CLONE_NEWNET
