@@ -11,7 +11,7 @@ use std::{
     time::Duration,
 };
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use caps::CapSet;
 use clap::Parser;
 use log::debug;
@@ -74,7 +74,8 @@ fn isolation(parent: UnixDatagram, uid: Uid, gid: Gid, cmd: &[String]) -> Result
     debug!("mounted {:?} to /etc/resolv.conf", resolv_conf.path());
 
     // Create and configure a TUN interface for use with onionmasq.
-    let tun = TunTapInterface::new(DEVICE_NAME, Medium::Ip)?;
+    let tun = TunTapInterface::new(DEVICE_NAME, Medium::Ip)
+        .context("failed to open tun interface, is tun kmod loaded?")?;
     let index = netlink::get_index(DEVICE_NAME)?;
     netlink::add_address(index, IpAddr::V4(Ipv4Addr::new(169, 254, 42, 1)), 24)?;
     netlink::add_address(
@@ -110,7 +111,10 @@ fn isolation(parent: UnixDatagram, uid: Uid, gid: Gid, cmd: &[String]) -> Result
     // It is important to not use something like `execve` or anything that else
     // that could hinder the execution of Rust Drop traits, as otherwise the
     // `resolv_conf` file will leak into the temporary directory.
-    let mut child = Command::new(&cmd[0]).args(&cmd[1..]).spawn()?;
+    let mut child = Command::new(&cmd[0])
+        .args(&cmd[1..])
+        .spawn()
+        .context("failed to spawn command")?;
     Ok(child.wait()?)
 }
 
@@ -133,11 +137,12 @@ fn main() -> Result<ExitCode> {
                 // This statement looks a bit complicated but all it does is
                 // converting `Result<ExitStatus, Error>` to `isize`.
                 isolation(parent.try_clone().unwrap(), uid, gid, &args.cmd)
-                    .unwrap()
-                    .code()
-                    .unwrap_or(1)
+                    .map(|exit_status| exit_status.code().unwrap_or(1))
+                    // fail with status 127 if we failed to spawn the process
+                    .inspect_err(|e| eprintln!("failed to spawn command: {e:?}"))
+                    .unwrap_or(127)
                     .try_into()
-                    .unwrap()
+                    .unwrap() // all i32 are be castable to isize on 32/64b platforms
             }),
             &mut stack,
             CloneFlags::CLONE_NEWNET
