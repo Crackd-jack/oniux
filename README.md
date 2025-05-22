@@ -19,6 +19,20 @@ loaded by default in most Linux distributions, but if you get a `File not found`
 error while running *oniux*, you may want to do a `modprobe tun` and run *oniux*
 again.
 
+## Security
+
+While *oniux* makes it harder for an application to leak than *torsocks*, it
+does not mean *oniux* is immune to it.  Primarily, malconfigured applications
+can still leak in the case they communicate (for example via Unix domain
+sockets) to processes outside of *oniux*.  A good example for that might be an
+instance of *Emacs* in the server mode.  If the server process runs outside of
+*oniux*, then obviously all clients that connect to it, will leak network
+connections, regardless if the various Emacs clients are run through *oniux* or
+not.  This is a technical limitation of network namespaces.  Unfortunately,
+there is no real way to block IPC without compromising usability, as in that
+case, an application isolated via *oniux* would probably provide no difference
+towards an isolation done via a virtual machine or an ordinary container.
+
 ## Internal Workings
 
 *oniux* works by immediately spawning a child process using the `clone(2)`
