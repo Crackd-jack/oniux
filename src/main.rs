@@ -35,6 +35,9 @@ mod user;
 /// The size of the stacks of our child processes
 const STACK_SIZE: usize = 1000 * 1000 * 8;
 
+/// The name of the loopback device
+const LOOPBACK_DEVICE: &str = "lo";
+
 /// The name of the TUN device
 const DEVICE_NAME: &str = "onion0";
 
@@ -73,20 +76,27 @@ fn isolation(parent: UnixDatagram, uid: Uid, gid: Gid, cmd: &[String]) -> Result
     mount::bind(resolv_conf.path(), &PathBuf::from("/etc/resolv.conf"))?;
     debug!("mounted {:?} to /etc/resolv.conf", resolv_conf.path());
 
+    // Setup the loopback device.
+    let loopback_index = netlink::get_index(LOOPBACK_DEVICE)?;
+    netlink::add_address(loopback_index, IpAddr::V4(Ipv4Addr::LOCALHOST), 8)?;
+    netlink::add_address(loopback_index, IpAddr::V6(Ipv6Addr::LOCALHOST), 128)?;
+    netlink::set_up(loopback_index)?;
+    debug!("finished setting up {LOOPBACK_DEVICE}");
+
     // Create and configure a TUN interface for use with onionmasq.
     let tun = TunTapInterface::new(DEVICE_NAME, Medium::Ip)
         .context("failed to open tun interface, is tun kmod loaded?")?;
-    let index = netlink::get_index(DEVICE_NAME)?;
-    netlink::add_address(index, IpAddr::V4(Ipv4Addr::new(169, 254, 42, 1)), 24)?;
+    let tun_index = netlink::get_index(DEVICE_NAME)?;
+    netlink::add_address(tun_index, IpAddr::V4(Ipv4Addr::new(169, 254, 42, 1)), 24)?;
     netlink::add_address(
-        index,
+        tun_index,
         IpAddr::V6(Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 0x1)),
         96,
     )?;
-    netlink::set_up(index)?;
-    netlink::set_default_gateway(index, AddressFamily::Inet)?;
-    netlink::set_default_gateway(index, AddressFamily::Inet6)?;
-    debug!("finished setting up networking");
+    netlink::set_up(tun_index)?;
+    netlink::set_default_gateway(tun_index, AddressFamily::Inet)?;
+    netlink::set_default_gateway(tun_index, AddressFamily::Inet6)?;
+    debug!("finished setting up the TUN device");
 
     // Drop all capabilities.
     caps::clear(None, CapSet::Permitted)?;
