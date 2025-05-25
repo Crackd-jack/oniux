@@ -2386,7 +2386,7 @@ dependencies = [
 
 [[package]]
 name = "oniux"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "caps",
@@ -2402,6 +2402,7 @@ dependencies = [
  "smoltcp",
  "tempfile",
  "tokio",
+ "tor-socksproto",
 ]
 
 [[package]]
