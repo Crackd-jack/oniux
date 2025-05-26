@@ -1,3 +1,5 @@
+#![deny(clippy::unwrap_used)]
+#![deny(clippy::expect_used)]
 use std::{
     io::Write,
     net::{IpAddr, Ipv4Addr, Ipv6Addr},
@@ -14,7 +16,7 @@ use std::{
 use anyhow::{Context, Result};
 use caps::CapSet;
 use clap::Parser;
-use log::debug;
+use log::{debug, error};
 use netlink_packet_route::AddressFamily;
 use nix::{
     libc,
@@ -128,11 +130,25 @@ fn isolation(parent: UnixDatagram, uid: Uid, gid: Gid, cmd: &[String]) -> Result
     Ok(child.wait()?)
 }
 
-fn main() -> Result<ExitCode> {
-    // Initialize the application.
-    env_logger::init();
-    let args = Args::parse();
+/// Runs an onion-tunnel endlessly on the `tun` device.
+fn onion_tunnel(tun: OwnedFd) -> Result<()> {
+    Runtime::new()?.block_on(async move {
+        let can_mark = LinuxScaffolding::can_mark();
+        let scaffolding = LinuxScaffolding {
+            can_mark,
+            cc: None,
+            log_connections: false,
+        };
+        let mut tunnel =
+            OnionTunnel::create_with_fd(scaffolding, tun, TunnelConfig::default()).await?;
+        tunnel.run().await?;
 
+        Ok(())
+    })
+}
+
+/// The actual main program.
+fn main_main(args: Args) -> Result<ExitCode> {
     // Create IPC primitives.
     let (parent, child) = UnixDatagram::pair()?;
 
@@ -144,15 +160,24 @@ fn main() -> Result<ExitCode> {
     let proc = unsafe {
         sched::clone(
             Box::new(|| {
-                // This statement looks a bit complicated but all it does is
-                // converting `Result<ExitStatus, Error>` to `isize`.
-                isolation(parent.try_clone().unwrap(), uid, gid, &args.cmd)
-                    .map(|exit_status| exit_status.code().unwrap_or(1))
-                    // fail with status 127 if we failed to spawn the process
-                    .inspect_err(|e| eprintln!("failed to spawn command: {e:?}"))
-                    .unwrap_or(127)
-                    .try_into()
-                    .unwrap() // all i32 are be castable to isize on 32/64b platforms
+                // Clone parent in a boilerplate way because we cannot use `?`.
+                let parent = match parent.try_clone() {
+                    Ok(parent) => parent,
+                    Err(e) => {
+                        error!("{e}");
+                        return 1;
+                    }
+                };
+
+                match isolation(parent, uid, gid, &args.cmd) {
+                    // Use of unwrap is okay because usize >= u32 on our archs.
+                    #[allow(clippy::unwrap_used)]
+                    Ok(code) => code.code().unwrap_or(127).try_into().unwrap(),
+                    Err(e) => {
+                        error!("{e}");
+                        1
+                    }
+                }
             }),
             &mut stack,
             CloneFlags::CLONE_NEWNET
@@ -176,20 +201,9 @@ fn main() -> Result<ExitCode> {
     // Maybe we could use `Runtime::spawn` instead, but spawning the task
     // ourselves in combinating with `Runtime::block_on` gives me a more fuzzy
     // feeling in terms of control.
-    thread::spawn(|| {
-        Runtime::new().unwrap().block_on(async move {
-            let can_mark = LinuxScaffolding::can_mark();
-            let scaffolding = LinuxScaffolding {
-                can_mark,
-                cc: None,
-                log_connections: false,
-            };
-            let mut tunnel = OnionTunnel::create_with_fd(scaffolding, tun, TunnelConfig::default())
-                .await
-                .unwrap();
-
-            tunnel.run().await
-        })
+    thread::spawn(|| match onion_tunnel(tun) {
+        Ok(()) => {}
+        Err(e) => error!("{e}"),
     });
     debug!("spawned onion-tunnel thread");
 
@@ -198,5 +212,20 @@ fn main() -> Result<ExitCode> {
     match wait::waitpid(proc, None)? {
         WaitStatus::Exited(_, code) => Ok(ExitCode::from(u8::try_from(code)?)),
         _ => Ok(ExitCode::FAILURE),
+    }
+}
+
+/// Wrapper around [`main_main()`] to properly log errors.
+fn main() -> ExitCode {
+    // Necessary steps before invocation of `main_main`.
+    env_logger::init();
+    let args = Args::parse();
+
+    match main_main(args) {
+        Ok(code) => code,
+        Err(e) => {
+            error!("{e}");
+            ExitCode::FAILURE
+        }
     }
 }
