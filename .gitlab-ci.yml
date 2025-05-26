@@ -11,6 +11,12 @@ rust-clippy:
     - rustup component add clippy
     - cargo clippy
 
+cargo-fmt:
+  stage: check
+  script:
+    - rustup component add rustfmt
+    - cargo fmt --check
+
 rust-latest:
   stage: build
   script:
