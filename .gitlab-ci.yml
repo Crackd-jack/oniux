@@ -1,7 +1,15 @@
 image: rust:latest
 
 stages:
+  - check
   - build
+
+rust-clippy:
+  stage: check
+  allow_failure: true
+  script:
+    - rustup component add clippy
+    - cargo clippy
 
 rust-latest:
   stage: build
