@@ -12,9 +12,9 @@ use std::sync::Arc;
 
 use anyhow::{anyhow, Context};
 use tokio::io::{AsyncReadExt, AsyncWrite, AsyncWriteExt};
-use tokio::net::TcpListener;
-use tokio::net::TcpStream;
+use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Notify;
+use tokio::task::JoinSet;
 
 use tor_socksproto::{Handshake, SocksAddr, SocksCmd, SocksRequest};
 
@@ -30,10 +30,12 @@ pub async fn run_naive_proxy_from_inside_a_network_namespace(
         .await
         .context("failed to bind Socks proxy")?;
 
+    let mut join_set = JoinSet::new();
+
     tokio::select! {
         _ = async {
             while let Ok((conn, _addr)) = listener.accept().await {
-            tokio::task::spawn(handle_single_conn(conn));
+            join_set.spawn(handle_single_conn(conn));
         }} => {},
         _ = notify.notified() => {},
     };
