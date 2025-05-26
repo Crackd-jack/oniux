@@ -1,7 +1,7 @@
 //! Helper functions for `user_namespaces(7)`.
 //!
 //! All functions require a working procfs mount at `/proc`.
-
+#![allow(clippy::unused_io_amount)]
 use std::{fs::File, io::Write};
 
 use anyhow::Result;
