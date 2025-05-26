@@ -47,6 +47,10 @@ struct Args {
     /// The actual program to execute
     #[arg(trailing_var_arg = true, required = true)]
     cmd: Vec<String>,
+
+    /// Port to start a SOCKS server on inside oniux
+    #[arg(short = 'p', long, value_name = "PORT")]
+    socks_port: Option<u16>,
 }
 
 /// Generate an empty stack for calls to `clone(2)`
@@ -54,7 +58,7 @@ fn gen_stack() -> Vec<u8> {
     vec![0u8; STACK_SIZE]
 }
 
-fn isolation(parent: UnixDatagram, uid: Uid, gid: Gid, cmd: &[String]) -> Result<ExitStatus> {
+fn isolation(parent: UnixDatagram, uid: Uid, gid: Gid, args: &Args) -> Result<ExitStatus> {
     // Initialize the mount namespace properly.
     mount::init_namespace()?;
     mount::procfs(&PathBuf::from("/proc"))?;
@@ -121,29 +125,34 @@ fn isolation(parent: UnixDatagram, uid: Uid, gid: Gid, cmd: &[String]) -> Result
     let notify = std::sync::Arc::new(tokio::sync::Notify::new());
     let notify_recv = notify.clone();
 
-    thread::spawn(move || {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_io()
-            .enable_time()
-            .build()
-            .unwrap();
-        runtime
-            .block_on(socks::run_naive_proxy_from_inside_a_network_namespace(
-                SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 9050),
-                notify_recv,
-            ))
-            .unwrap()
-    });
+    if let Some(socks_port) = args.socks_port {
+        thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_io()
+                .enable_time()
+                .build()
+                .unwrap();
+            runtime
+                .block_on(socks::run_naive_proxy_from_inside_a_network_namespace(
+                    SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), socks_port),
+                    notify_recv,
+                ))
+                .unwrap()
+        });
+    }
 
     // Run the actual child and wait for its termination.
     // It is important to not use something like `execve` or anything that else
     // that could hinder the execution of Rust Drop traits, as otherwise the
     // `resolv_conf` file will leak into the temporary directory.
-    let mut child = Command::new(&cmd[0])
-        .args(&cmd[1..])
-        .env("ALL_PROXY", "socks5h://127.0.0.1:9050")
-        .spawn()
-        .context("failed to spawn command")?;
+    let mut command = Command::new(&args.cmd[0]);
+    command.args(&args.cmd[1..]);
+    if let Some(socks_port) = args.socks_port {
+        command.env("ALL_PROXY", format!("socks5h://127.0.0.1:{socks_port}"));
+    } else {
+        command.env_remove("ALL_PROXY");
+    }
+    let mut child = command.spawn().context("failed to spawn command")?;
     let res = child.wait()?;
     notify.notify_one();
     Ok(res)
@@ -167,7 +176,7 @@ fn main() -> Result<ExitCode> {
             Box::new(|| {
                 // This statement looks a bit complicated but all it does is
                 // converting `Result<ExitStatus, Error>` to `isize`.
-                isolation(parent.try_clone().unwrap(), uid, gid, &args.cmd)
+                isolation(parent.try_clone().unwrap(), uid, gid, &args)
                     .map(|exit_status| exit_status.code().unwrap_or(1))
                     // fail with status 127 if we failed to spawn the process
                     .inspect_err(|e| eprintln!("failed to spawn command: {e:?}"))
