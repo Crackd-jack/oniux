@@ -13,7 +13,7 @@ use std::{
     time::Duration,
 };
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use caps::CapSet;
 use clap::Parser;
 use log::{debug, error};
@@ -149,6 +149,10 @@ fn onion_tunnel(tun: OwnedFd) -> Result<()> {
 
 /// The actual main program.
 fn main_main(args: Args) -> Result<ExitCode> {
+    if !std::path::Path::new("/dev/net/tun").exists() {
+        bail!("tun kernel module not loaded");
+    }
+
     // Create IPC primitives.
     let (parent, child) = UnixDatagram::pair()?;
 
