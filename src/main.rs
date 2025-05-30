@@ -29,6 +29,7 @@ use sendfd::{RecvWithFd, SendWithFd};
 use smoltcp::phy::{Medium, TunTapInterface};
 use tempfile::NamedTempFile;
 use tokio::runtime::Runtime;
+use std::net::TcpListener;
 
 mod mount;
 mod netlink;
@@ -48,6 +49,11 @@ struct Args {
     /// The actual program to execute
     #[arg(trailing_var_arg = true, required = true)]
     cmd: Vec<String>,
+
+    /// Port to start a SOCKS server on inside oniux
+    #[arg(short = 'p', long, value_name = "PORT")]
+    socks_port: Option<u16>,
+
 }
 
 /// Generate an empty stack for calls to `clone(2)`
@@ -55,7 +61,7 @@ fn gen_stack() -> Vec<u8> {
     vec![0u8; STACK_SIZE]
 }
 
-fn isolation(parent: UnixDatagram, uid: Uid, gid: Gid, cmd: &[String]) -> Result<ExitStatus> {
+fn isolation(parent: UnixDatagram, uid: Uid, gid: Gid, args: &Args) -> Result<ExitStatus> {
     // Initialize the mount namespace properly.
     mount::init_namespace()?;
     mount::procfs(&PathBuf::from("/proc"))?;
@@ -108,8 +114,20 @@ fn isolation(parent: UnixDatagram, uid: Uid, gid: Gid, cmd: &[String]) -> Result
     debug!("dropped all capabilites");
 
     // Send the device to the parent.
-    parent.send_with_fd(&[0; 1024], &[tun.as_raw_fd()])?;
+    let mut fd_to_send = Vec::new();
+    fd_to_send.push(tun.as_raw_fd());
+    let socks_listener = if let Some(socks_port) = args.socks_port {
+        let listener = TcpListener::bind((IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), socks_port))
+            .context("failed to bind socks listener")?;
+        debug!("socks listener bound");
+        fd_to_send.push(listener.as_raw_fd());
+        Some(listener)
+    } else {
+        None
+    };
+    parent.send_with_fd(&[0; 1024], &fd_to_send)?;
     drop(tun);
+    drop(socks_listener);
     debug!("sent TUN device");
 
     // The 100ms is a rather arbitrary timeout, but it probably does not hurt
@@ -123,15 +141,19 @@ fn isolation(parent: UnixDatagram, uid: Uid, gid: Gid, cmd: &[String]) -> Result
     // It is important to not use something like `execve` or anything that else
     // that could hinder the execution of Rust Drop traits, as otherwise the
     // `resolv_conf` file will leak into the temporary directory.
-    let mut child = Command::new(&cmd[0])
-        .args(&cmd[1..])
-        .spawn()
-        .context("failed to spawn command")?;
+    let mut command = Command::new(&args.cmd[0]);
+    command.args(&args.cmd[1..]);
+    if let Some(socks_port) = args.socks_port {
+        command.env("ALL_PROXY", format!("socks5h://127.0.0.1:{socks_port}"));
+    } else {
+        command.env_remove("ALL_PROXY");
+    }
+    let mut child = command.spawn().context("failed to spawn command")?;
     Ok(child.wait()?)
 }
 
 /// Runs an onion-tunnel endlessly on the `tun` device.
-fn onion_tunnel(tun: OwnedFd) -> Result<()> {
+fn onion_tunnel(tun: OwnedFd, socks_listener: Option<TcpListener>) -> Result<()> {
     Runtime::new()?.block_on(async move {
         let can_mark = LinuxScaffolding::can_mark();
         let scaffolding = LinuxScaffolding {
@@ -141,7 +163,21 @@ fn onion_tunnel(tun: OwnedFd) -> Result<()> {
         };
         let mut tunnel =
             OnionTunnel::create_with_fd(scaffolding, tun, TunnelConfig::default()).await?;
-        tunnel.run().await?;
+
+        let mut tasks = tokio::task::JoinSet::new();
+        if let Some(socks_listener) = socks_listener {
+            // we need to do this before giving the socket to tokio
+            socks_listener.set_nonblocking(true)?;
+            let tokio_listener = tokio::net::TcpListener::from_std(socks_listener)?;
+            let listener = tokio_listener.into();
+            tasks.spawn(arti::socks::run_socks_proxy_with_listeners(tunnel.get_tor_client(), vec![listener], None));
+        }
+        tasks.spawn(async move {
+            tunnel.run().await.context("tunnel died")
+        });
+        for task_res in tasks.join_all().await {
+            task_res?;
+        }
 
         Ok(())
     })
@@ -173,7 +209,7 @@ fn main_main(args: Args) -> Result<ExitCode> {
                     }
                 };
 
-                match isolation(parent, uid, gid, &args.cmd) {
+                match isolation(parent, uid, gid, &args) {
                     // Use of unwrap is okay because usize >= u32 on our archs.
                     #[allow(clippy::unwrap_used)]
                     Ok(code) => code.code().unwrap_or(127).try_into().unwrap(),
@@ -194,10 +230,17 @@ fn main_main(args: Args) -> Result<ExitCode> {
     drop(parent);
 
     // Receive file descriptor.
-    let mut fds = [-1];
+    let mut fds = [-1, -1];
     let (_, nfds) = child.recv_with_fd(&mut [0; 1024], &mut fds)?;
-    assert_eq!(nfds, 1);
     assert_ne!(fds[0], -1);
+    let socks_listener = if nfds == 2 {
+        assert_ne!(fds[1], -1);
+        let std_listener = unsafe { std::net::TcpListener::from_raw_fd(fds[1]) };
+        Some(std_listener)
+    } else {
+        assert_eq!(nfds, 1);
+        None
+    };
     let tun = unsafe { OwnedFd::from_raw_fd(fds[0]) };
     debug!("received TUN file descriptor");
 
@@ -205,7 +248,7 @@ fn main_main(args: Args) -> Result<ExitCode> {
     // Maybe we could use `Runtime::spawn` instead, but spawning the task
     // ourselves in combinating with `Runtime::block_on` gives me a more fuzzy
     // feeling in terms of control.
-    thread::spawn(|| match onion_tunnel(tun) {
+    thread::spawn(|| match onion_tunnel(tun, socks_listener) {
         Ok(()) => {}
         Err(e) => error!("{e}"),
     });
