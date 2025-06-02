@@ -8,7 +8,6 @@
 
 use std::net::IpAddr;
 
-use anyhow::{bail, Result};
 use log::debug;
 use netlink_packet_core::{
     ErrorMessage, NetlinkDeserializable, NetlinkHeader, NetlinkMessage, NetlinkPayload,
@@ -21,11 +20,26 @@ use netlink_packet_route::{
     AddressFamily, RouteNetlinkMessage,
 };
 use netlink_sys::{protocols::NETLINK_ROUTE, Socket, SocketAddr};
+use thiserror::Error;
 
 const DEFAULT_BUF_SIZE: usize = 4096;
 
+#[derive(Error, Debug)]
+pub enum NetlinkError {
+    #[error("I/O error: {0}")]
+    IO(#[from] std::io::Error),
+    #[error("netlink sent {expected} bytes instead of {found} bytes")]
+    Send { expected: usize, found: usize },
+    #[error("netlink message couldn't be deserialized: {0}")]
+    Decode(String),
+    #[error("{0}")]
+    Internal(String),
+    #[error("interface {name} does not seem to exist")]
+    MissingInterface { name: String },
+}
+
 /// Create a netlink socket and bind it properly
-fn create_socket(protocol: isize) -> Result<Socket> {
+fn create_socket(protocol: isize) -> Result<Socket, NetlinkError> {
     let mut socket = Socket::new(protocol)?;
     socket.bind_auto()?;
     socket.connect(&SocketAddr::new(0, 0))?;
@@ -34,7 +48,10 @@ fn create_socket(protocol: isize) -> Result<Socket> {
 }
 
 /// Send `msg` over `socket` and ensure that it has been fully sent
-fn send<I: NetlinkSerializable>(socket: &mut Socket, msg: &NetlinkMessage<I>) -> Result<()> {
+fn send<I: NetlinkSerializable>(
+    socket: &mut Socket,
+    msg: &NetlinkMessage<I>,
+) -> Result<(), NetlinkError> {
     // Serialize msg
     let mut buf = vec![0; msg.header.length as usize];
     msg.serialize(&mut buf);
@@ -42,22 +59,27 @@ fn send<I: NetlinkSerializable>(socket: &mut Socket, msg: &NetlinkMessage<I>) ->
     // Send the message
     let n = socket.send(&buf[..], 0)?;
     if n != buf.len() {
-        bail!("netlink sent {n} bytes instead of {} bytes", buf.len());
+        return Err(NetlinkError::Send {
+            found: n,
+            expected: buf.len(),
+        });
     }
 
     Ok(())
 }
 
 /// Receive on `socket` and deserialize into `I`
-fn recv<I: NetlinkDeserializable>(socket: &mut Socket) -> Result<NetlinkMessage<I>> {
+fn recv<I: NetlinkDeserializable>(socket: &mut Socket) -> Result<NetlinkMessage<I>, NetlinkError> {
     let mut buf = vec![0_u8; DEFAULT_BUF_SIZE];
     socket.recv(&mut &mut buf[..], 0)?;
 
-    Ok(NetlinkMessage::deserialize(&buf)?)
+    // Version mismatch when wrapping
+    // `NetlinkError::Decode(netlink_packet_utils::errors::DecodeError)`
+    NetlinkMessage::deserialize(&buf).map_err(|e| NetlinkError::Decode(e.to_string()))
 }
 
 /// Return the index of an interface given by its name
-pub fn get_index(name: &str) -> Result<u32> {
+pub fn get_index(name: &str) -> Result<u32, NetlinkError> {
     let mut socket = create_socket(NETLINK_ROUTE)?;
     debug!("created netlink socket to find {name}");
 
@@ -78,11 +100,19 @@ pub fn get_index(name: &str) -> Result<u32> {
     // Parse it down
     let resp = match resp.payload {
         NetlinkPayload::InnerMessage(msg) => msg,
-        _ => bail!("did not received NetlinkPayload::InnerMessage"),
+        _ => {
+            return Err(NetlinkError::Internal(
+                "did not receive NetlinkPayload::InnerMessage".to_string(),
+            ))
+        }
     };
     let resp = match resp {
         RouteNetlinkMessage::NewLink(msg) => msg,
-        _ => bail!("inner message is not of type RouteNetlinkMessage::NewLink"),
+        _ => {
+            return Err(NetlinkError::Internal(
+                "inner message is not of type RouteNetlinkMessage::NewLink".to_string(),
+            ))
+        }
     };
 
     // Check whether the returned attributes do contain an interface named `name`
@@ -91,7 +121,9 @@ pub fn get_index(name: &str) -> Result<u32> {
         _ => false,
     });
     if !exists {
-        bail!("interface {name} does not seem to exist");
+        return Err(NetlinkError::MissingInterface {
+            name: name.to_string(),
+        });
     }
 
     // Finally, return the index of the interface
@@ -99,7 +131,7 @@ pub fn get_index(name: &str) -> Result<u32> {
 }
 
 /// Set an interface up
-pub fn set_up(index: u32) -> Result<()> {
+pub fn set_up(index: u32) -> Result<(), NetlinkError> {
     let mut socket = create_socket(NETLINK_ROUTE)?;
     debug!("created netlink socket to set {index} UP");
 
@@ -120,7 +152,11 @@ pub fn set_up(index: u32) -> Result<()> {
     // Check for errors (ACK is Error with code zero)
     match resp.payload {
         NetlinkPayload::Error(ErrorMessage { code: None, .. }) => {}
-        _ => bail!("netlink failed for unknown reasons while setting {index} UP"),
+        _ => {
+            return Err(NetlinkError::Internal(format!(
+                "netlink failed for unknown reasons while setting {index} UP"
+            )))
+        }
     }
     debug!("setted interface {index} to UP");
 
@@ -128,7 +164,7 @@ pub fn set_up(index: u32) -> Result<()> {
 }
 
 /// Add `addr` to interface `index`
-pub fn add_address(index: u32, addr: IpAddr, prefix_len: u8) -> Result<()> {
+pub fn add_address(index: u32, addr: IpAddr, prefix_len: u8) -> Result<(), NetlinkError> {
     let mut socket = create_socket(NETLINK_ROUTE)?;
     debug!("created socket for adding an IP address to {index}");
 
@@ -159,7 +195,11 @@ pub fn add_address(index: u32, addr: IpAddr, prefix_len: u8) -> Result<()> {
     // Check for errors (ACK is Error with code zero)
     match resp.payload {
         NetlinkPayload::Error(ErrorMessage { code: None, .. }) => {}
-        _ => bail!("netlink failed for unknown reasons adding IP to {index}"),
+        _ => {
+            return Err(NetlinkError::Internal(format!(
+                "netlink failed for unknown reasons adding IP to {index}"
+            )))
+        }
     }
     debug!("added IP to {index}");
 
@@ -169,7 +209,7 @@ pub fn add_address(index: u32, addr: IpAddr, prefix_len: u8) -> Result<()> {
 /// Sets the interface with `index` as the default gateway for `af`
 ///
 /// TODO: Consider not exposing `AddressFamily` here
-pub fn set_default_gateway(index: u32, af: AddressFamily) -> Result<()> {
+pub fn set_default_gateway(index: u32, af: AddressFamily) -> Result<(), NetlinkError> {
     let mut socket = create_socket(NETLINK_ROUTE)?;
     debug!("created socket for adding default gateway for {:?}", af);
 
@@ -195,11 +235,12 @@ pub fn set_default_gateway(index: u32, af: AddressFamily) -> Result<()> {
     // Check for errors (ACK is Error with code zero)
     match resp.payload {
         NetlinkPayload::Error(ErrorMessage { code: None, .. }) => {}
-        e => bail!(
-            "netlink failed for unknown reasons default gateway {:?} {:#?}",
-            af,
-            e
-        ),
+        e => {
+            return Err(NetlinkError::Internal(format!(
+                "netlink failed for unknown reasons default gateway {:?} {:#?}",
+                af, e
+            )))
+        }
     }
     debug!("added default gateway {:?}", af);
 
