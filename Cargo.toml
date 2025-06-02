@@ -23,6 +23,7 @@ sendfd = "0.4.4"
 smoltcp = { git = "https://gitlab.torproject.org/tpo/core/smoltcp.git" }
 tempfile = "3.19.1"
 tokio = { version = "1.44.1", features = ["full"] }
+thiserror = "2.0.12"
 
 [profile.release]
 lto = true
