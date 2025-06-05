@@ -2,6 +2,9 @@
 
 **This is still considered experimental software!**
 
+> Security isn't just about the tools you use or the software you download.
+> It begins with understanding the unique threats you face and how you can counter those threats.
+
 *oniux* is a tool that utilizes various Linux `namespaces(7)` in order to isolate
 an arbitrary application over the Tor network.  To achieve this, it makes heavy
 use of the [onionmasq](https://gitlab.torproject.org/tpo/core/onionmasq), which
