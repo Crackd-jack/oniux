@@ -10,6 +10,8 @@ an arbitrary application over the Tor network.  To achieve this, it makes heavy
 use of the [onionmasq](https://gitlab.torproject.org/tpo/core/onionmasq), which
 offers a TUN device to send Tor traffic through.
 
+[![Packaging status](https://repology.org/badge/vertical-allrepos/oniux.svg)](https://repology.org/project/oniux/versions)
+
 ## Usage
 
 ```sh
