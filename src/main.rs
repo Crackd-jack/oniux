@@ -1,6 +1,7 @@
 #![deny(clippy::unwrap_used)]
 #![deny(clippy::expect_used)]
 use std::{
+    fs::File,
     io::Write,
     net::{IpAddr, Ipv4Addr, Ipv6Addr},
     os::{
@@ -45,10 +46,8 @@ const DEVICE_NAME: &str = "onion0";
 
 #[derive(Parser, Debug, Clone)]
 struct Args {
-    #[arg(long)]
-    no_user_ns: bool,
-    #[arg(long)]
-    no_mount_proc: bool,
+    #[arg(long, value_name = "path")]
+    join_user_ns: Option<String>,
     /// The actual program to execute
     #[arg(trailing_var_arg = true, required = true)]
     cmd: Vec<String>,
@@ -60,8 +59,13 @@ fn gen_stack() -> Vec<u8> {
 }
 
 fn isolation(parent: UnixDatagram, uid: Uid, gid: Gid, args: Args) -> Result<ExitStatus> {
+    if let Some(ref user_ns) = &args.join_user_ns {
+        let f = File::open(user_ns)?;
+        sched::setns(&f, CloneFlags::CLONE_NEWUSER)?;
+        sched::unshare(CloneFlags::CLONE_NEWNET | CloneFlags::CLONE_NEWNS)?;
+    }
     mount::init_namespace()?;
-    if !args.no_mount_proc {
+    if let None = args.join_user_ns {
         // Initialize the mount namespace properly.
         mount::procfs(&PathBuf::from("/proc"))?;
         debug!("finished mount namespace setup");
@@ -167,13 +171,14 @@ fn main_main(args: Args) -> Result<ExitCode> {
     let gid = Gid::current();
 
     let mut stack = gen_stack();
-    let mut clone_flags = CloneFlags::CLONE_NEWNET | CloneFlags::CLONE_NEWNS;
-    if !args.no_user_ns {
-        clone_flags |= CloneFlags::CLONE_NEWUSER;
-    }
-    if !args.no_mount_proc {
-        clone_flags |= CloneFlags::CLONE_NEWPID;
-    }
+    let clone_flags = if let None = args.join_user_ns {
+        CloneFlags::CLONE_NEWUSER
+            | CloneFlags::CLONE_NEWNET
+            | CloneFlags::CLONE_NEWNS
+            | CloneFlags::CLONE_NEWPID
+    } else {
+        CloneFlags::empty()
+    };
     let proc = unsafe {
         sched::clone(
             Box::new(|| {
