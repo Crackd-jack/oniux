@@ -18,7 +18,9 @@ netlink-packet-core = "0.7.0"
 netlink-packet-route = "0.24.0"
 netlink-sys = "0.8.7"
 nix = { version = "0.30.1", features = ["sched", "process", "fs", "mount", "user"] }
-onion-tunnel = { git = "https://gitlab.torproject.org/tpo/core/onionmasq.git" }
+#onion-tunnel = { git = "https://gitlab.torproject.org/tpo/core/onionmasq.git" }
+onion-tunnel = { git = "https://gitlab.torproject.org/tpo/core/onionmasq.git", rev = "b869ac2" }
+arti = { version = "1.4.3" , features = ["experimental-api"]}
 sendfd = "0.4.4"
 smoltcp = { git = "https://gitlab.torproject.org/tpo/core/smoltcp.git" }
 tempfile = "3.19.1"
@@ -28,3 +30,17 @@ thiserror = "2.0.12"
 [profile.release]
 lto = true
 opt-level = "s"
+
+[patch.crates-io]
+onion-tunnel = { git = "https://gitlab.torproject.org/tpo/core/onionmasq.git", rev = "b869ac2" }
+arti = { git = "https://gitlab.torproject.org/trinity-1686a/arti.git", rev = "18cf78a" }
+arti-client = { git = "https://gitlab.torproject.org/trinity-1686a/arti.git", rev = "18cf78a" }
+tor-config = { git = "https://gitlab.torproject.org/trinity-1686a/arti.git", rev = "18cf78a" }
+tor-rtcompat = { git = "https://gitlab.torproject.org/trinity-1686a/arti.git", rev = "18cf78a" }
+tor-linkspec = { git = "https://gitlab.torproject.org/trinity-1686a/arti.git", rev = "18cf78a" }
+tor-netdir = { git = "https://gitlab.torproject.org/trinity-1686a/arti.git", rev = "18cf78a" }
+tor-dirmgr = { git = "https://gitlab.torproject.org/trinity-1686a/arti.git", rev = "18cf78a" }
+tor-proto = { git = "https://gitlab.torproject.org/trinity-1686a/arti.git", rev = "18cf78a" }
+tor-llcrypto = { git = "https://gitlab.torproject.org/trinity-1686a/arti.git", rev = "18cf78a" }
+tor-geoip = { git = "https://gitlab.torproject.org/trinity-1686a/arti.git", rev = "18cf78a" }
+fs-mistrust = { git = "https://gitlab.torproject.org/trinity-1686a/arti.git", rev = "18cf78a" }
