@@ -43,8 +43,12 @@ const LOOPBACK_DEVICE: &str = "lo";
 /// The name of the TUN device
 const DEVICE_NAME: &str = "onion0";
 
-#[derive(Parser, Debug)]
+#[derive(Parser, Debug, Clone)]
 struct Args {
+    #[arg(long)]
+    no_user_ns: bool,
+    #[arg(long)]
+    no_mount_proc: bool,
     /// The actual program to execute
     #[arg(trailing_var_arg = true, required = true)]
     cmd: Vec<String>,
@@ -55,17 +59,19 @@ fn gen_stack() -> Vec<u8> {
     vec![0u8; STACK_SIZE]
 }
 
-fn isolation(parent: UnixDatagram, uid: Uid, gid: Gid, cmd: &[String]) -> Result<ExitStatus> {
-    // Initialize the mount namespace properly.
+fn isolation(parent: UnixDatagram, uid: Uid, gid: Gid, args: Args) -> Result<ExitStatus> {
     mount::init_namespace()?;
-    mount::procfs(&PathBuf::from("/proc"))?;
-    debug!("finished mount namespace setup");
+    if !args.no_mount_proc {
+        // Initialize the mount namespace properly.
+        mount::procfs(&PathBuf::from("/proc"))?;
+        debug!("finished mount namespace setup");
 
-    // Perform UID and GID mappings.
-    user::setgroups(false)?;
-    user::uid_map(uid, uid)?;
-    user::gid_map(gid, gid)?;
-    debug!("finished user namespace mappings");
+        // Perform UID and GID mappings.
+        user::setgroups(false)?;
+        user::uid_map(uid, uid)?;
+        user::gid_map(gid, gid)?;
+        debug!("finished user namespace mappings");
+    }
 
     // Overwrite `/etc/resolv.conf` with a bind mound to use the nameservers
     // provided by onionmasq.
@@ -123,8 +129,8 @@ fn isolation(parent: UnixDatagram, uid: Uid, gid: Gid, cmd: &[String]) -> Result
     // It is important to not use something like `execve` or anything that else
     // that could hinder the execution of Rust Drop traits, as otherwise the
     // `resolv_conf` file will leak into the temporary directory.
-    let mut child = Command::new(&cmd[0])
-        .args(&cmd[1..])
+    let mut child = Command::new(&args.cmd[0])
+        .args(&args.cmd[1..])
         .spawn()
         .context("failed to spawn command")?;
     Ok(child.wait()?)
@@ -161,6 +167,13 @@ fn main_main(args: Args) -> Result<ExitCode> {
     let gid = Gid::current();
 
     let mut stack = gen_stack();
+    let mut clone_flags = CloneFlags::CLONE_NEWNET | CloneFlags::CLONE_NEWNS;
+    if !args.no_user_ns {
+        clone_flags |= CloneFlags::CLONE_NEWUSER;
+    }
+    if !args.no_mount_proc {
+        clone_flags |= CloneFlags::CLONE_NEWPID;
+    }
     let proc = unsafe {
         sched::clone(
             Box::new(|| {
@@ -173,7 +186,7 @@ fn main_main(args: Args) -> Result<ExitCode> {
                     }
                 };
 
-                match isolation(parent, uid, gid, &args.cmd) {
+                match isolation(parent, uid, gid, args.clone()) {
                     // Use of unwrap is okay because usize >= u32 on our archs.
                     #[allow(clippy::unwrap_used)]
                     Ok(code) => code.code().unwrap_or(127).try_into().unwrap(),
@@ -184,10 +197,7 @@ fn main_main(args: Args) -> Result<ExitCode> {
                 }
             }),
             &mut stack,
-            CloneFlags::CLONE_NEWNET
-                | CloneFlags::CLONE_NEWNS
-                | CloneFlags::CLONE_NEWPID
-                | CloneFlags::CLONE_NEWUSER,
+            clone_flags,
             Some(libc::SIGCHLD),
         )
     }?;
