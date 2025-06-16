@@ -22,6 +22,7 @@ onion-tunnel = { git = "https://gitlab.torproject.org/tpo/core/onionmasq.git" }
 sendfd = "0.4.4"
 smoltcp = { git = "https://gitlab.torproject.org/tpo/core/smoltcp.git" }
 tempfile = "3.19.1"
+tor-socksproto = "0.30.0"
 tokio = { version = "1.44.1", features = ["full"] }
 thiserror = "2.0.12"
 

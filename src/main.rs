@@ -2,7 +2,7 @@
 #![deny(clippy::expect_used)]
 use std::{
     io::Write,
-    net::{IpAddr, Ipv4Addr, Ipv6Addr},
+    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
     os::{
         fd::{AsRawFd, FromRawFd, OwnedFd},
         unix::net::UnixDatagram,
@@ -32,6 +32,7 @@ use tokio::runtime::Runtime;
 
 mod mount;
 mod netlink;
+mod socks;
 mod user;
 
 /// The size of the stacks of our child processes
@@ -48,6 +49,10 @@ struct Args {
     /// The actual program to execute
     #[arg(trailing_var_arg = true, required = true)]
     cmd: Vec<String>,
+
+    /// Port to start a SOCKS server on inside oniux
+    #[arg(short = 'p', long, value_name = "PORT")]
+    socks_port: Option<u16>,
 }
 
 /// Generate an empty stack for calls to `clone(2)`
@@ -55,7 +60,7 @@ fn gen_stack() -> Vec<u8> {
     vec![0u8; STACK_SIZE]
 }
 
-fn isolation(parent: UnixDatagram, uid: Uid, gid: Gid, cmd: &[String]) -> Result<ExitStatus> {
+fn isolation(parent: UnixDatagram, uid: Uid, gid: Gid, args: &Args) -> Result<ExitStatus> {
     // Initialize the mount namespace properly.
     mount::init_namespace()?;
     mount::procfs(&PathBuf::from("/proc"))?;
@@ -119,15 +124,40 @@ fn isolation(parent: UnixDatagram, uid: Uid, gid: Gid, cmd: &[String]) -> Result
     // that might be a little bit overkill.
     thread::sleep(Duration::from_millis(100));
 
+    let notify = std::sync::Arc::new(tokio::sync::Notify::new());
+    let notify_recv = notify.clone();
+
+    if let Some(socks_port) = args.socks_port {
+        thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_io()
+                .enable_time()
+                .build()
+                .unwrap();
+            runtime
+                .block_on(socks::run_naive_proxy_from_inside_a_network_namespace(
+                    SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), socks_port),
+                    notify_recv,
+                ))
+                .unwrap()
+        });
+    }
+
     // Run the actual child and wait for its termination.
     // It is important to not use something like `execve` or anything that else
     // that could hinder the execution of Rust Drop traits, as otherwise the
     // `resolv_conf` file will leak into the temporary directory.
-    let mut child = Command::new(&cmd[0])
-        .args(&cmd[1..])
-        .spawn()
-        .context("failed to spawn command")?;
-    Ok(child.wait()?)
+    let mut command = Command::new(&args.cmd[0]);
+    command.args(&args.cmd[1..]);
+    if let Some(socks_port) = args.socks_port {
+        command.env("ALL_PROXY", format!("socks5h://127.0.0.1:{socks_port}"));
+    } else {
+        command.env_remove("ALL_PROXY");
+    }
+    let mut child = command.spawn().context("failed to spawn command")?;
+    let res = child.wait()?;
+    notify.notify_one();
+    Ok(res)
 }
 
 /// Runs an onion-tunnel endlessly on the `tun` device.
@@ -173,7 +203,7 @@ fn main_main(args: Args) -> Result<ExitCode> {
                     }
                 };
 
-                match isolation(parent, uid, gid, &args.cmd) {
+                match isolation(parent, uid, gid, &args) {
                     // Use of unwrap is okay because usize >= u32 on our archs.
                     #[allow(clippy::unwrap_used)]
                     Ok(code) => code.code().unwrap_or(127).try_into().unwrap(),
