@@ -26,7 +26,3 @@ jobs:
 
       - name: Run snapshot action
         uses: actions/go-dependency-submission@v2
-        with:
-            # Required: Define the repo path to the go.mod file used by the
-            # build target
-            # go-mod-path: go-example/go.mod
